@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
 
-from omnigent.db.db_models import SqlConversation, SqlUser
+from omnigent.db.db_models import SqlUser
 from omnigent.db.utils import (
     _ITEM_TYPE_PREFIX,
     clear_engine_cache,
@@ -38,7 +39,6 @@ from omnigent.db.utils import (
     now_epoch_us,
     utc_day,
 )
-
 
 # ── normalize_database_url ────────────────────────────
 
@@ -73,7 +73,9 @@ class TestNormalizeDatabaseUrl:
 
 class TestEngineCaching:
     @pytest.fixture(autouse=True)
-    def _clean_cache(self) -> None:
+    def _clean_cache(self) -> Iterator[None]:
+        clear_engine_cache()
+        yield
         clear_engine_cache()
 
     def test_same_uri_returns_same_engine(self, tmp_path: Path) -> None:
@@ -224,8 +226,7 @@ class TestFtsHelpers:
         with managed() as session:
             deleted = session.execute(
                 text(
-                    "SELECT item_id FROM conversation_items_fts "
-                    "WHERE conversation_id = 'conv_del'"
+                    "SELECT item_id FROM conversation_items_fts WHERE conversation_id = 'conv_del'"
                 )
             ).fetchall()
             assert len(deleted) == 0

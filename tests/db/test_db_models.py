@@ -11,7 +11,6 @@ import time
 
 import pytest
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
 from omnigent.db.db_models import (
     SqlAccountToken,
@@ -28,7 +27,6 @@ from omnigent.db.db_models import (
     SqlUserDailyCost,
 )
 from omnigent.db.utils import get_or_create_engine, make_managed_session_maker
-
 
 # ── helpers ───────────────────────────────────────────
 
@@ -88,13 +86,6 @@ def _make_item(
         data='{"content": [{"type": "text", "text": "hello"}]}',
         search_text="hello",
     )
-
-
-def _session(db_uri: str) -> Session:
-    """Create a raw SQLAlchemy session from the db_uri fixture."""
-    engine = get_or_create_engine(db_uri)
-    managed = make_managed_session_maker(engine)
-    return managed
 
 
 # ── SqlAgent ──────────────────────────────────────────
@@ -551,9 +542,7 @@ class TestSqlConversationLabel:
 
         with managed() as session:
             labels = (
-                session.query(SqlConversationLabel)
-                .filter_by(conversation_id="conv_test1")
-                .all()
+                session.query(SqlConversationLabel).filter_by(conversation_id="conv_test1").all()
             )
             assert len(labels) == 2
 
@@ -579,9 +568,7 @@ class TestSqlSessionPermission:
             session.add(perm)
 
         with managed() as session:
-            loaded = session.get(
-                SqlSessionPermission, ("alice@example.com", "conv_test1")
-            )
+            loaded = session.get(SqlSessionPermission, ("alice@example.com", "conv_test1"))
             assert loaded is not None
             assert loaded.level == 2
 
@@ -774,12 +761,20 @@ class TestSqlHost:
 
         now = _now()
         h1 = SqlHost(
-            owner="a@x.com", name="h1", host_id="host_dup", status="online",
-            created_at=now, updated_at=now,
+            owner="a@x.com",
+            name="h1",
+            host_id="host_dup",
+            status="online",
+            created_at=now,
+            updated_at=now,
         )
         h2 = SqlHost(
-            owner="b@x.com", name="h2", host_id="host_dup", status="offline",
-            created_at=now, updated_at=now,
+            owner="b@x.com",
+            name="h2",
+            host_id="host_dup",
+            status="offline",
+            created_at=now,
+            updated_at=now,
         )
         with pytest.raises(IntegrityError):
             with managed() as session:
@@ -816,14 +811,24 @@ class TestSqlUserDailyCost:
         managed = make_managed_session_maker(engine)
 
         with managed() as session:
-            session.add(SqlUserDailyCost(
-                user_id="u1", day_utc="2026-06-15", cost_usd=1.0,
-                ask_approved_usd=0.0, updated_at=_now(),
-            ))
-            session.add(SqlUserDailyCost(
-                user_id="u1", day_utc="2026-06-16", cost_usd=2.0,
-                ask_approved_usd=0.0, updated_at=_now(),
-            ))
+            session.add(
+                SqlUserDailyCost(
+                    user_id="u1",
+                    day_utc="2026-06-15",
+                    cost_usd=1.0,
+                    ask_approved_usd=0.0,
+                    updated_at=_now(),
+                )
+            )
+            session.add(
+                SqlUserDailyCost(
+                    user_id="u1",
+                    day_utc="2026-06-16",
+                    cost_usd=2.0,
+                    ask_approved_usd=0.0,
+                    updated_at=_now(),
+                )
+            )
 
         with managed() as session:
             rows = session.query(SqlUserDailyCost).filter_by(user_id="u1").all()
