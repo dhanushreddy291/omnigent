@@ -1421,9 +1421,14 @@ def _build_cursor_spawn_env(
     if model is not None:
         env["HARNESS_CURSOR_MODEL"] = model
     # Only api-key auth maps to CURSOR_API_KEY; Databricks/provider auth has no
-    # cursor equivalent and is left to cursor's own login.
+    # cursor equivalent and is left to cursor's own login. With no spec api-key
+    # auth, fall back to an ambient CURSOR_API_KEY so a user who exported the key
+    # (or a host launched with it) can run cursor without declaring auth in every
+    # spec — the SDK requires the key in the spawned harness's environment.
     if isinstance(spec.executor.auth, ApiKeyAuth):
         env["HARNESS_CURSOR_API_KEY"] = spec.executor.auth.api_key
+    elif os.environ.get("CURSOR_API_KEY"):
+        env["HARNESS_CURSOR_API_KEY"] = os.environ["CURSOR_API_KEY"]
     # Always set so the wrap doesn't default to ``"all"`` over an explicit
     # ``skills: none`` (parity with the peer builders).
     env["HARNESS_CURSOR_SKILLS_FILTER"] = json.dumps(spec.skills_filter)

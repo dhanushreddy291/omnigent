@@ -31,8 +31,11 @@ from omnigent.spec.types import (
 @pytest.fixture(autouse=True)
 def _isolate_global_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Point OMNIGENT_CONFIG_HOME at an empty temp dir so the developer's real
-    ``~/.omnigent/config.yaml`` can't leak into these tests."""
+    ``~/.omnigent/config.yaml`` can't leak in, and clear any ambient
+    ``CURSOR_API_KEY`` so the no-auth / DatabricksAuth cases are deterministic
+    (the builder falls back to an ambient key — see the ambient-fallback test)."""
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
 
 
 def _make_spec(
@@ -84,9 +87,25 @@ def test_databricks_auth_does_not_set_api_key() -> None:
 
 
 def test_no_auth_omits_api_key_env_var() -> None:
-    """With no spec auth, no ``HARNESS_CURSOR_API_KEY`` is written."""
+    """With no spec auth and no ambient key, no ``HARNESS_CURSOR_API_KEY`` is written."""
     env = _build_cursor_spawn_env(_make_spec(auth=None))
     assert "HARNESS_CURSOR_API_KEY" not in env
+
+
+def test_ambient_cursor_api_key_used_when_no_spec_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no spec api-key auth, an ambient ``CURSOR_API_KEY`` is threaded as
+    ``HARNESS_CURSOR_API_KEY`` so a user who exported the key can run cursor
+    without declaring auth in the spec (the SDK needs it in the harness env)."""
+    monkeypatch.setenv("CURSOR_API_KEY", "crsr_ambient")
+    env = _build_cursor_spawn_env(_make_spec(auth=None))
+    assert env["HARNESS_CURSOR_API_KEY"] == "crsr_ambient"
+
+
+def test_spec_api_key_wins_over_ambient(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit spec api-key auth takes precedence over an ambient key."""
+    monkeypatch.setenv("CURSOR_API_KEY", "crsr_ambient")
+    env = _build_cursor_spawn_env(_make_spec(auth=ApiKeyAuth(api_key="crsr_spec")))
+    assert env["HARNESS_CURSOR_API_KEY"] == "crsr_spec"
 
 
 def test_skills_filter_always_set() -> None:
