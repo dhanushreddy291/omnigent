@@ -617,7 +617,27 @@ def _build_models_json(
     :returns: Pi ``models.json`` contents.
     """
     h = host.rstrip("/")
-    openai_base_url = (base_urls or {}).get("openai") or f"{h}/serving-endpoints"
+    serving_endpoints_url = f"{h}/serving-endpoints"
+    raw_openai_base_url = (base_urls or {}).get("openai")
+    # ucode hands us its ``openai`` family as the Codex *Responses* gateway
+    # (``.../ai-gateway/codex/v1``), which serves only ``/responses``. Pi's
+    # ``openai-completions`` providers POST ``/chat/completions``, so every GPT
+    # (and catch-all) dispatch 404s on that gateway. Re-route only that case to
+    # the workspace serving-endpoints, which serves Databricks models over an
+    # OpenAI-compatible Chat Completions API. A generic provider (OpenRouter /
+    # LiteLLM / local) is itself a Chat Completions endpoint and never carries
+    # ``/ai-gateway/codex``, so it passes through untouched. This is a narrower,
+    # codex-specific form of the ``/ai-gateway/`` base-URL check in
+    # ``_is_databricks_openai_client`` (openai_agents_sdk_executor.py), so the
+    # working anthropic gateway is never re-routed. ``databricks-gemini-*`` ids
+    # ride this same serving-endpoints path via ``databricks-completions``: Pi
+    # speaks only ``openai-completions`` / ``anthropic-messages`` /
+    # ``openai-responses``, not the Google ``generateContent`` the ucode gemini
+    # gateway (``.../ai-gateway/gemini/v1beta``) serves.
+    if raw_openai_base_url and "/ai-gateway/codex" in raw_openai_base_url:
+        openai_base_url = serving_endpoints_url
+    else:
+        openai_base_url = raw_openai_base_url or serving_endpoints_url
     claude_base_url = (base_urls or {}).get("claude") or f"{h}/serving-endpoints/anthropic"
     config: dict[str, Any] = {  # type: ignore[explicit-any]  # Pi-owned schema, see note above
         "providers": {

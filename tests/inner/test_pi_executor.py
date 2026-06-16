@@ -372,9 +372,13 @@ class TestBuildModelsJson(unittest.TestCase):
             },
         )
         p = result["providers"]
+        # The ucode ``openai`` value is the Codex Responses gateway, which only
+        # serves ``/responses`` and 404s the ``/chat/completions`` POST pi makes
+        # for ``openai-completions``. GPT and the catch-all are re-routed to the
+        # workspace serving-endpoints; claude keeps its working anthropic gateway.
         self.assertEqual(
             p["databricks"]["baseUrl"],
-            "https://host.example.com/ai-gateway/codex/v1",
+            "https://host.example.com/serving-endpoints",
         )
         self.assertEqual(
             p["databricks-anthropic"]["baseUrl"],
@@ -382,8 +386,52 @@ class TestBuildModelsJson(unittest.TestCase):
         )
         self.assertEqual(
             p["databricks-completions"]["baseUrl"],
-            "https://host.example.com/ai-gateway/codex/v1",
+            "https://host.example.com/serving-endpoints",
         )
+
+    def test_ucode_codex_gateway_rerouted_off_responses_path(self):
+        # The Codex gateway only implements /responses; pi posts
+        # /chat/completions for openai-completions, so the codex URL must not
+        # survive onto a completions provider (the #241 GPT 404).
+        result = _build_models_json(
+            "https://host.example.com",
+            "tok",
+            {"openai": "https://host.example.com/ai-gateway/codex/v1"},
+        )
+        for name in ("databricks", "databricks-completions"):
+            base_url = result["providers"][name]["baseUrl"]
+            self.assertNotIn("/ai-gateway/codex", base_url)
+            self.assertEqual(base_url, "https://host.example.com/serving-endpoints")
+
+    def test_gemini_model_routed_off_codex_gateway(self):
+        # Gemini ids fall to databricks-completions; before the fix that
+        # inherited the codex URL too (the #241 Gemini 404). They must land on
+        # the OpenAI-compatible serving-endpoints, not the codex gateway.
+        result = _build_models_json(
+            "https://host.example.com",
+            "tok",
+            {"openai": "https://host.example.com/ai-gateway/codex/v1"},
+            model="databricks-gemini-2-5-pro",
+        )
+        provider = result["providers"][_pi_provider_for_model("databricks-gemini-2-5-pro")]
+        self.assertEqual(provider["baseUrl"], "https://host.example.com/serving-endpoints")
+        self.assertIn(
+            "databricks-gemini-2-5-pro",
+            [entry.get("id") for entry in provider["models"]],
+        )
+
+    def test_generic_openai_base_url_used_as_is(self):
+        # A non-ucode provider (OpenRouter/LiteLLM/local) gives a real
+        # chat-completions URL with no ``/ai-gateway/codex`` segment; it must
+        # pass through untouched so the re-route never breaks generic gateways.
+        result = _build_models_json(
+            "https://host.example.com",
+            "tok",
+            {"openai": "https://openrouter.ai/api/v1"},
+        )
+        p = result["providers"]
+        self.assertEqual(p["databricks"]["baseUrl"], "https://openrouter.ai/api/v1")
+        self.assertEqual(p["databricks-completions"]["baseUrl"], "https://openrouter.ai/api/v1")
 
     def test_api_key_set(self):
         result = _build_models_json("https://host.example.com", "mytoken")
