@@ -1993,10 +1993,20 @@ def test_harness_choices_help_lists_cursor_and_antigravity() -> None:
     ``omnigent run --harness`` / the bare-harness launch. Cursor was wired in
     with its feature PR; antigravity (a peer in-process SDK harness, accepted by
     ``_validate_harness`` via ``OMNIGENT_HARNESSES``) must be advertised the
-    same way so the two have parity. Pin every user-facing SDK choice so a
-    future edit can't silently drop one.
+    same way so the two have parity. Pin every choice the help advertises (the
+    canonical harness ids plus the ``claude`` alias) so a future edit can't
+    silently drop one.
     """
-    for harness in ("antigravity", "claude-sdk", "codex", "cursor", "openai-agents", "pi"):
+    for harness in (
+        "antigravity",
+        "claude",
+        "claude-sdk",
+        "codex",
+        "cursor",
+        "openai-agents",
+        "open-responses",
+        "pi",
+    ):
         assert f"'{harness}'" in _HARNESS_CHOICES_HELP, _HARNESS_CHOICES_HELP
 
 
