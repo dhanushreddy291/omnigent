@@ -369,10 +369,8 @@ jobs:
                   labels_add.append(p)
 
               # Contributor routing
-              if result.get("good_first_issue"):
-                  labels_add.append("good-first-issue")
               if result.get("help_wanted"):
-                  labels_add.append("help-wanted")
+                  labels_add.append("help wanted")
 
               # Duplicate — only accept if the issue number is in our
               # pre-fetched candidate list (prevents hallucinated refs).

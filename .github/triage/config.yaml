@@ -35,7 +35,6 @@ prompt: |
     "components": ["comp:server" | "comp:runner" | "comp:repr" | "comp:web-ui" | "comp:policies" | "comp:harnesses" | "comp:infra"],
     "priority": "P0-critical" | "P1-high" | "P2-medium" | "P3-low" | null,
     "needs_info": true | false,
-    "good_first_issue": true | false,
     "help_wanted": true | false,
     "duplicate_of": <issue number> | null,
     "reasoning": "<1-2 sentence explanation of your classification>"
@@ -70,11 +69,8 @@ prompt: |
   - `P2-medium` — bug with workaround, or important feature request
   - `P3-low` — minor issue, cosmetic, nice-to-have
 
-  **good_first_issue** — `true` if well-scoped, self-contained, and a
-  newcomer could tackle it.
-
-  **help_wanted** — `true` if the issue needs community help but requires
-  more codebase context.
+  **help_wanted** — `true` if the issue could benefit from community
+  contribution.
 
   **duplicate_of** — set to an issue number ONLY if one of the
   CANDIDATE DUPLICATES provided clearly describes the same problem.
