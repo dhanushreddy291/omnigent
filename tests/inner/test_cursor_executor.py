@@ -1041,3 +1041,48 @@ async def test_run_turn_native_tool_allowed_by_policy(monkeypatch: pytest.Monkey
     # The tool call went through.
     reqs = [e for e in events if isinstance(e, ToolCallRequest)]
     assert len(reqs) == 1 and reqs[0].name == "bash"
+
+
+def _policy_ask(ask_phase: str) -> Any:
+    """Build a fake policy evaluator that returns ASK on *ask_phase*, else ALLOW."""
+
+    async def evaluator(phase: str, _data: dict[str, Any]) -> Any:
+        action = "POLICY_ACTION_ASK" if phase == ask_phase else "POLICY_ACTION_ALLOW"
+        return SimpleNamespace(action=action, reason="approval required by test")
+
+    return evaluator
+
+
+async def test_run_turn_native_tool_ask_treated_as_deny(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ASK on a native tool is fail-closed to DENY because cursor native tools
+    cannot be paused for human approval."""
+    script = {
+        "messages": [
+            _assistant("Let me check."),
+            _tool("bash", "t1", "running", args={"cmd": "ls"}),
+        ],
+        "status": "finished",
+        "result": "",
+    }
+    _install_fake_sdk(monkeypatch, [script])
+    executor = CursorExecutor(api_key="crsr_x")
+    executor._policy_evaluator = _policy_ask("PHASE_TOOL_CALL")
+    try:
+        events = [e async for e in executor.run_turn([_user("hi")], [], "SYS")]
+    finally:
+        await executor.close()
+
+    # The tool call is emitted but then an error follows.
+    reqs = [e for e in events if isinstance(e, ToolCallRequest)]
+    assert len(reqs) == 1
+    assert reqs[0].name == "bash"
+
+    errors = [e for e in events if isinstance(e, ExecutorError)]
+    assert len(errors) == 1
+    assert "auto-denied" in errors[0].message
+    assert "approval required" in errors[0].message
+
+    # No TurnComplete — the turn was aborted.
+    assert not any(isinstance(e, TurnComplete) for e in events)

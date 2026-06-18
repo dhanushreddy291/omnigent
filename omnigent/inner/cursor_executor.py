@@ -434,6 +434,10 @@ class CursorExecutor(Executor):
         """Evaluate PHASE_TOOL_CALL policy for a Cursor native tool.
 
         Returns ``{"block": bool, "reason": str}``.
+
+        ASK is treated as DENY (fail-closed) because Cursor native tools
+        execute inside the Cursor process — by the time we observe them the
+        tool has already started, so we cannot pause for human approval.
         """
         evaluator = self._policy_evaluator
         if evaluator is None:
@@ -442,6 +446,15 @@ class CursorExecutor(Executor):
         action = getattr(verdict, "action", None)
         if action == "POLICY_ACTION_DENY":
             return {"block": True, "reason": getattr(verdict, "reason", "") or "blocked by policy"}
+        if action == "POLICY_ACTION_ASK":
+            reason = getattr(verdict, "reason", "") or "approval required by policy"
+            logger.warning(
+                "TOOL_CALL policy ASK on native cursor tool %s — treating as DENY "
+                "(cannot pause cursor-internal execution for human approval): %s",
+                name,
+                reason,
+            )
+            return {"block": True, "reason": f"approval required (auto-denied for cursor native tool): {reason}"}
         return {"block": False, "reason": ""}
 
     # -- custom-tool bridge -------------------------------------------------
