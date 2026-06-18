@@ -89,18 +89,6 @@ skips:
     issue: 532
     cluster: files-uploads-attachments
     mode: skip
-  - id: tests/e2e/test_d6_direct_cancel_e2e.py::test_sdk_cancels_local_body_on_llm_cancel_task
-    reason: "Server raises in _build_terminal_event during cancel flow; final response surfaces as 'failed' with 'Failed to retrieve final response'. Real server-side bug in cancel→terminal handling."
-    issue: 532
-    cluster: terminal-d6
-    mode: xfail
-
-  - id: tests/e2e/test_d6_sdk_async_dispatch_e2e.py::test_sdk_async_client_tool_completes_round_trip
-    reason: "Same 'Failed to retrieve final response' server bug as test_sdk_cancels_local_body_on_llm_cancel_task; _build_terminal_event raises during D6 async-dispatch round-trip."
-    issue: 532
-    cluster: terminal-d6
-    mode: xfail
-
   - id: tests/e2e/test_repl_approval_e2e.py::test_repl_refusal_shows_deny_sentinel
     reason: "Pexpect timeout waiting for 'approval required' regex. Same REPL-pexpect timeout family as the earlier test_repl_* entries."
     issue: 532
