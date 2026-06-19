@@ -273,3 +273,35 @@ jobs:
           # `warn` not `ignore`: every shard makes LLM calls, so a missing
           # tokens file means the recorder broke.
           if-no-files-found: warn
+
+  # Deterministically re-dispatch Merge Ready after the mirrored fork-e2e push;
+  # the workflow_run -> merge-ready hop is brittle for forks (dropped on #751).
+  # No checkout + actions:write only, so fork test code never sees the token;
+  # workflow_dispatch via GITHUB_TOKEN is exempt from the recursion guard.
+  merge-ready-rerun:
+    name: Merge Ready rerun
+    needs: e2e
+    if: >-
+      always()
+      && github.event_name == 'push'
+      && startsWith(github.ref_name, 'fork-e2e/pr-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - name: Re-dispatch Merge Ready for the mirrored PR
+        run: |
+          set -euo pipefail
+          # Mirror branch is fork-e2e/pr-<N>; extract the PR number.
+          PR="${REF_NAME##*/pr-}"
+          if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+            echo "::notice::ref '$REF_NAME' is not fork-e2e/pr-<N>; nothing to do."
+            exit 0
+          fi
+          echo "Re-dispatching merge-ready.yml for PR #$PR after $GITHUB_WORKFLOW."
+          gh workflow run merge-ready.yml --repo "$REPO" -f pr="$PR"
