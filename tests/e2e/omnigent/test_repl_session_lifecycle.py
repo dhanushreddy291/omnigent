@@ -507,6 +507,58 @@ def test_repl_local_mode_launches_runner_subprocess(
         clean_exit(child, timeout=_EXIT_TIMEOUT)
     finally:
         child.close(force=True)
+@contextlib.contextmanager
+def _registered_runner(
+    base_url: str,
+    repo_root: Path,
+    yaml_path: Path,
+    tmp_path: Path,
+) -> Iterator[str]:
+    """
+    Register one runner against a remote-style test server.
+
+    Used by direct SDK e2e coverage where there is no REPL process to
+    launch the runner.
+
+    :param base_url: Omnigent server URL, e.g. ``"http://127.0.0.1:8123"``.
+    :param repo_root: Workspace root exposed to runner-local tools.
+    :param yaml_path: Spec path to prewarm on the runner.
+    :param tmp_path: Per-test temporary directory used for captured
+        runner logs.
+    :yields: Registered runner id.
+    """
+    from omnigent.cli import _start_cli_runner_process, _stop_cli_runner_process
+
+    runner = _start_cli_runner_process(
+        server_url=base_url,
+        workspace_cwd=repo_root,
+        capture_logs=True,
+        log_dir=tmp_path / "logs",
+        prewarm_spec_path=yaml_path,
+    )
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if runner.proc.poll() is not None:
+            raise AssertionError(
+                f"runner exited early with code {runner.proc.returncode}",
+            )
+        with contextlib.suppress(httpx.HTTPError):
+            response = httpx.get(
+                f"{base_url}/v1/runners/{runner.runner_id}/status",
+                timeout=2.0,
+            )
+            if response.status_code == 200 and response.json()["online"] is True:
+                break
+        # Runner registration arrives over the websocket tunnel from
+        # another process, so the test polls the public status API.
+        _pause_between_external_polls(0.25)
+    else:
+        raise AssertionError(f"runner {runner.runner_id} did not register")
+
+    try:
+        yield runner.runner_id
+    finally:
+        _stop_cli_runner_process(runner.proc, grace_timeout=1.0)
 
 
 def test_repl_full_session_lifecycle(
