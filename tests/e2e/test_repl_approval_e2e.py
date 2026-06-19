@@ -1333,28 +1333,21 @@ def test_repl_tool_result_ask_does_not_prompt_in_repl(
             welcome_pattern="e2e.tool.result.gate",
         )
         child.send("pineapple" + "\r")
-        # The turn must complete without ever parking on a banner —
-        # `· ready` is the post-turn idle settle. 120s headroom: REPL turns
-        # can exceed 60s under concurrent-worker contention on 2-vCPU CI
-        # runners (the #523 pexpect boot/turn-starvation family); the pytest
-        # cap is --timeout=180, so 120 stays within budget.
-        _wait_for_turn_complete(child, timeout=120)
-        full_turn = child.before or ""
-        if isinstance(full_turn, bytes):
-            full_turn = full_turn.decode("utf-8", errors="replace")
-        full_turn = _strip_ansi(full_turn)
+        # Sync on the follow-up reply, NOT the cosmetic `· ready` idle-settle.
+        # The post-tool reply only renders after the LLM's second call (the
+        # tool round-trip completed) and proves the turn finished — while the
+        # `· ready` idle-settle marker intermittently fails to render under CI
+        # load (the #523 pexpect family), hanging the wait past 120s even
+        # though the turn itself completed. The sibling pass-through test syncs
+        # the same way and is stable. If a banner had parked the turn, the
+        # follow-up would never arrive and this expect would time out.
+        child.expect(follow_up, timeout=120)
+        full_turn = _strip_ansi((child.before or "") + follow_up)
         # No interactive approval banner for the TOOL_RESULT ASK.
         assert "approval required" not in full_turn, (
             "A TOOL_RESULT-phase approval banner surfaced — interactive "
             "mid-flight ASK is not implemented (see #765); the REPL must "
             f"not render one today.\nCaptured:\n{full_turn[:1500]}"
-        )
-        # The mock follow-up text — proves the turn completed (the LLM
-        # was called a second time with the tool result in hand).
-        assert follow_up in full_turn, (
-            "The turn did not complete with the follow-up reply after the "
-            "TOOL_RESULT ASK — it may have parked waiting for a prompt that "
-            f"never comes.\nCaptured:\n{full_turn[:1500]}"
         )
         # The raw tool output reached the LLM untouched (no deny
         # sentinel) — the ASK passed through rather than blocking.
