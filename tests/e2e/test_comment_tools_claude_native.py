@@ -382,9 +382,7 @@ def test_claude_native_agent_addresses_comments_without_tool_guidance(
             "via --profile oss with this gate set."
         )
     if shutil.which("claude") is None:
-        pytest.skip(
-            "'claude' CLI is not on PATH. Install Claude Code to run this test."
-        )
+        pytest.skip("'claude' CLI is not on PATH. Install Claude Code to run this test.")
     if shutil.which("tmux") is None:
         pytest.skip(
             "'tmux' is not on PATH. This test requires tmux to run Claude Code headlessly."
@@ -445,9 +443,7 @@ def test_claude_native_agent_addresses_comments_without_tool_guidance(
                 "tool_calls": [
                     {
                         "name": "update_comment",
-                        "arguments": (
-                            f'{{"comment_id": "{comment1_id}", "status": "addressed"}}'
-                        ),
+                        "arguments": (f'{{"comment_id": "{comment1_id}", "status": "addressed"}}'),
                     }
                 ]
             },
@@ -456,9 +452,7 @@ def test_claude_native_agent_addresses_comments_without_tool_guidance(
                 "tool_calls": [
                     {
                         "name": "update_comment",
-                        "arguments": (
-                            f'{{"comment_id": "{comment2_id}", "status": "addressed"}}'
-                        ),
+                        "arguments": (f'{{"comment_id": "{comment2_id}", "status": "addressed"}}'),
                     }
                 ]
             },
