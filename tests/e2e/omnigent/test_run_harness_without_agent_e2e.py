@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pexpect
 import pytest
 
 from omnigent.runtime.harnesses import _HARNESS_MODULES
@@ -26,7 +27,6 @@ from tests.e2e._harness_probes import (
     skip_if_harness_cli_missing,
 )
 from tests.e2e.omnigent._pexpect_harness import (
-    clean_exit,
     spawn_omnigent_run,
     strip_ansi,
 )
@@ -38,7 +38,6 @@ _PROMPT_TEMPLATE = (
 )
 _SPAWN_TIMEOUT = 120.0
 _COMPLETION_TIMEOUT = 240.0
-_EXIT_TIMEOUT = 20.0
 
 
 @pytest.mark.parametrize("probe", HARNESS_PROBES, ids=HARNESS_IDS)
@@ -89,32 +88,31 @@ def test_run_harness_without_agent_live_repl_round_trip(
         initial_prompt=prompt,
     )
     try:
-        child.expect("◆", timeout=_COMPLETION_TIMEOUT)
-        agent_before = child.before or ""
-        child.expect(marker, timeout=_COMPLETION_TIMEOUT)
-        marker_before = child.before or ""
-        marker_after = child.after or ""
-        clean_exit(child, timeout=_EXIT_TIMEOUT)
-        exit_code = child.exitstatus
-        signal_status = child.signalstatus
+        # Headless ``-p`` one-shot: the launcher boots, auto-submits the
+        # prompt, prints the accumulated reply, and exits on its own. It does
+        # NOT render the interactive ``◆`` assistant-turn glyph — the headless
+        # completion path (#783) sends the turn output straight to stdout and
+        # then the process EOFs. Read to EOF and assert the marker landed.
+        child.expect(pexpect.EOF, timeout=_COMPLETION_TIMEOUT)
+        output = strip_ansi(child.before or "")
     finally:
-        if not child.closed:
-            child.close(force=True)
+        # The process has already exited (EOF); close() reaps its exit/signal
+        # status — it does not force-kill an already-dead child.
+        child.close(force=True)
 
-    combined_stripped = (
-        strip_ansi(agent_before) + "◆" + strip_ansi(marker_before) + str(marker_after)
-    )
+    exit_code = child.exitstatus
+    signal_status = child.signalstatus
     assert exit_code == 0, (
         f"[{probe.harness}] REPL exited non-zero: exit={exit_code}, "
-        f"signal={signal_status}; output tail:\n{combined_stripped[-4000:]}"
+        f"signal={signal_status}; output tail:\n{output[-4000:]}"
     )
     assert signal_status is None, (
         f"[{probe.harness}] REPL terminated by signal {signal_status}; "
-        f"output tail:\n{combined_stripped[-4000:]}"
+        f"output tail:\n{output[-4000:]}"
     )
-    assert marker in combined_stripped, (
+    assert marker in output, (
         f"[{probe.harness}] marker {marker!r} missing from REPL output; "
-        f"output tail:\n{combined_stripped[-4000:]}"
+        f"output tail:\n{output[-4000:]}"
     )
 
 
