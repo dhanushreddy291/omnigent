@@ -619,9 +619,7 @@ def test_prompt_policy_allow_path_reaches_llm(
     body = poll_session_until_terminal(
         http_client, session_id=session_id, response_id=rid, timeout=120
     )
-    assert body["status"] == "completed", (
-        f"Unexpected status: {body.get('error')}"
-    )
+    assert body["status"] == "completed", f"Unexpected status: {body.get('error')}"
     text = _extract_all_assistant_text(body)
     assert len(text.strip()) > 0, "Expected LLM output after ALLOW; got empty response."
     assert "[Denied by policy" not in text
