@@ -39,9 +39,44 @@ permissions:
   contents: read
 
 jobs:
-  # tests/e2e against the pinned old server — same shards/flags as e2e.yml.
+  # Compute the SAME matrices the gates use (e2e-shard-matrix.sh /
+  # integration-matrix.sh), so backcompat runs exactly the shards/legs the real
+  # gate runs for this event — no hardcoded list to drift. Notably integration
+  # is openai-agents only: claude-sdk/codex reject the mock LLM's "mock-model"
+  # so the gate excludes them (see integration-matrix.sh); backcompat must too.
+  setup:
+    name: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      e2e_matrix: ${{ steps.e2e.outputs.matrix }}
+      integration_matrix: ${{ steps.integration.outputs.matrix }}
+    steps:
+      - name: Check out CI scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          sparse-checkout: .github/scripts/ci
+          persist-credentials: false
+      - name: Compute e2e shard matrix
+        id: e2e
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          NUM_SHARDS: "4"
+        run: bash .github/scripts/ci/e2e-shard-matrix.sh
+      - name: Compute integration matrix
+        id: integration
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: bash .github/scripts/ci/integration-matrix.sh
+
+  # tests/e2e against the pinned old server — same shards as e2e.yml.
   backcompat-e2e:
     name: Backcompat e2e (server ${{ github.event.inputs.server_version || 'latest' }}, shard ${{ matrix.shard_id }}/${{ matrix.num_shards }})
+    needs: setup
     runs-on: ubuntu-latest
     # Job-level cap (composite run steps can't set timeout-minutes); mirrors
     # e2e.yml's ~30-min test budget + setup + old-server build.
@@ -49,12 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
-      matrix:
-        include:
-          - { shard_id: 0, num_shards: 4 }
-          - { shard_id: 1, num_shards: 4 }
-          - { shard_id: 2, num_shards: 4 }
-          - { shard_id: 3, num_shards: 4 }
+      matrix: ${{ fromJSON(needs.setup.outputs.e2e_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -90,17 +120,15 @@ jobs:
   # integration.yml.
   backcompat-integration:
     name: Backcompat integration (server ${{ github.event.inputs.server_version || 'latest' }}, ${{ matrix.harness }})
+    needs: setup
     runs-on: ubuntu-latest
     # Job-level cap (composite run steps can't set timeout-minutes); mirrors
     # integration.yml's 30-min budget + the old-server build.
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { harness: claude-sdk, model: databricks-claude-sonnet-4-6, workers: 4 }
-          - { harness: openai-agents, model: databricks-gpt-5-4-mini, workers: 4 }
-          - { harness: codex, model: databricks-gpt-5-5, workers: 2 }
+      # openai-agents only (per integration-matrix.sh) — same as the gate.
+      matrix: ${{ fromJSON(needs.setup.outputs.integration_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
