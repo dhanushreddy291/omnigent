@@ -13,7 +13,7 @@
 bbqiu server,runner,harnesses,repr
 daniellok-db server,runner,harnesses,web-ui
 dhruv0811 server,runner,harnesses,repr,infra,tui
-fanzeyi server,runner,harnesses,repr
+fanzeyi server,runner,harnesses,repr,tui
 PattaraS server,runner,harnesses,infra
 SabhyaC26 server,runner,harnesses,repr,tui
 TomeHirata server,runner,harnesses,policies,infra,tui
