@@ -1137,6 +1137,12 @@ class SessionsChat:
                         # Reset: the dispatch wait is over; if the synthesis
                         # itself dispatches, it will set the flag again.
                         self._last_turn_saw_waiting = False
+                    elif event.status == "idle":
+                        # Session fully done — no sub-agents pending. Break
+                        # immediately so the headless probe exits in ~100 ms
+                        # for single-turn agents instead of waiting the full
+                        # probe timeout.
+                        break
                 elif isinstance(event, _TURN_TERMINAL_EVENT_TYPES):
                     break
 
