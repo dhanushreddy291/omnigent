@@ -83,11 +83,17 @@ _logger = logging.getLogger(__name__)
 # still running (PR #930, for the headless ``-p`` fast-exit). Servers older than
 # 0.3.0 don't model "waiting" — their ``SessionResponse.status`` is
 # ``Literal["idle","running","failed"]`` — and 500 on ``GET /v1/sessions`` when
-# they try to serialize the cached value. So the runner probes the server's
-# version once and downgrades "waiting"→"running" for older servers. ``None``
-# until probed; any probe failure leaves it falsey → downgrade (never 500s).
+# they try to serialize the cached value. So we resolve the server version once
+# (``_get_server_version``) and, when publishing status, downgrade
+# "waiting"→"running" unless that version supports it
+# (``_version_supports_waiting_status``). An unknown version — unprobed or a
+# probe failure — downgrades too, so an old server is never 500'd.
 _WAITING_STATUS_MIN_SERVER_VERSION = "0.3.0"
-_server_supports_waiting_status: bool | None = None
+# Cached server version from the one-time /api/version probe. ``_probed`` guards
+# the memoization: a failed probe leaves the version ``None`` but still probed,
+# so it is not retried on every session-create.
+_server_version: str | None = None
+_server_version_probed = False
 
 
 def _version_supports_waiting_status(server_version: str) -> bool:
@@ -104,35 +110,31 @@ def _version_supports_waiting_status(server_version: str) -> bool:
     return Version(server_version).release >= Version(_WAITING_STATUS_MIN_SERVER_VERSION).release
 
 
-async def _ensure_server_waiting_support(server_client: httpx.AsyncClient) -> None:
+async def _get_server_version(server_client: httpx.AsyncClient) -> str | None:
     """
-    Probe ``GET /api/version`` once; cache whether the server accepts "waiting".
+    Resolve the server's version via a one-time ``GET /api/version`` probe.
 
-    Memoized — returns immediately once probed. Degrades to "unsupported" on any
-    error so the runner never emits a status an older server would 500 on.
+    Memoized — the probe runs at most once per runner; later calls return the
+    cached value. Returns ``None`` if the probe failed, so callers fail safe
+    (treat an unknown version as not supporting newer behavior).
 
     :param server_client: The runner's httpx client pointed at the server.
+    :returns: The server's reported version (e.g. ``"0.2.0"``), or ``None`` when
+        the probe has not succeeded.
     """
-    global _server_supports_waiting_status
-    if _server_supports_waiting_status is not None:
-        return
+    global _server_version, _server_version_probed
+    if _server_version_probed:
+        return _server_version
     try:
         resp = await server_client.get("/api/version")
         resp.raise_for_status()
-        version = resp.json()["version"]
-        _server_supports_waiting_status = _version_supports_waiting_status(version)
-        _logger.info(
-            "server version %s: session.status 'waiting' %s",
-            version,
-            "supported" if _server_supports_waiting_status else "downgraded to 'running'",
-        )
+        _server_version = resp.json()["version"]
+        _logger.info("resolved server version: %s", _server_version)
     except Exception as exc:  # noqa: BLE001 — degrade gracefully; never 500 an old server
-        _server_supports_waiting_status = False
-        _logger.warning(
-            "could not probe server /api/version (%s); downgrading session.status "
-            "'waiting'->'running' for safety",
-            exc,
-        )
+        _server_version = None
+        _logger.warning("could not probe server /api/version (%s); treating as unknown", exc)
+    _server_version_probed = True
+    return _server_version
 
 
 def _client_safe_error_detail(exc: BaseException, *, context: str) -> str:
@@ -5411,11 +5413,11 @@ def create_runner_app(
                 },
             )
 
-        # Probe the server's version once so _publish_turn_status can downgrade
+        # Resolve the server version once so _publish_turn_status can downgrade
         # session.status "waiting"->"running" for servers too old to accept it
         # (< 0.3.0) — they'd otherwise 500 on GET /v1/sessions. Memoized; only
         # the first session-create on this runner pays the cheap GET.
-        await _ensure_server_waiting_support(server_client)
+        await _get_server_version(server_client)
 
         # Resolve the spec once — derive harness config from it and
         # cache it for resource endpoints (filesystem, terminals)
@@ -6868,10 +6870,12 @@ def create_runner_app(
         :returns: None.
         """
         # Backwards-compat: servers older than 0.3.0 can't serialize "waiting"
-        # and 500 on GET /v1/sessions, so downgrade it to "running" unless the
-        # server was positively probed as supporting it (see
-        # _ensure_server_waiting_support). None/False → downgrade (safe default).
-        if status == "waiting" and _server_supports_waiting_status is not True:
+        # and 500 on GET /v1/sessions. Downgrade it to "running" unless the
+        # resolved server version supports it; an unknown version (unprobed or
+        # probe failure) downgrades too (safe default). See _get_server_version.
+        if status == "waiting" and not (
+            _server_version is not None and _version_supports_waiting_status(_server_version)
+        ):
             status = "running"
         # An unresolved spec (``_session_harness_name`` → ``None``) means the
         # session hasn't resolved a terminal-backed harness yet, so no native
