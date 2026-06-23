@@ -31,6 +31,7 @@ from omnigent.onboarding.harness_install import (
     CURSOR_KEY,
     KIMI_KEY,
     PI_KEY,
+    QWEN_KEY,
     harness_cli_installed,
 )
 from omnigent.onboarding.provider_config import (
@@ -68,6 +69,12 @@ KIMI_SURFACE = "kimi"
 # unknown harness, letting a binary-less launch die inside the executor.
 _CURSOR_NATIVE_HARNESSES: frozenset[str] = frozenset({"cursor-native", "native-cursor"})
 
+# CLI-wrapping qwen harnesses. Both ``qwen`` and ``qwen-code`` resolve to the
+# same ``qwen`` binary (canonicalize_harness folds ``qwen-code`` → ``qwen``).
+# Unlike claude/codex they have no ``_HARNESS_FAMILY`` entry, so they must
+# be gated explicitly or they fail open.
+_QWEN_HARNESSES: frozenset[str] = frozenset({QWEN_KEY, "qwen-code"})
+
 
 def _canonical_harness(harness: str) -> str:
     """Normalize a harness id to its canonical spelling.
@@ -94,10 +101,13 @@ def _install_key(canonical: str) -> str:
         ``"kimi"``.
     :returns: ``"anthropic"`` / ``"openai"`` for the claude/codex CLIs,
         :data:`~omnigent.onboarding.harness_install.PI_KEY` for pi,
-        :data:`~omnigent.onboarding.harness_install.KIMI_KEY` for kimi.
+        :data:`~omnigent.onboarding.harness_install.KIMI_KEY` for kimi, or
+        :data:`~omnigent.onboarding.harness_install.QWEN_KEY` for qwen.
     """
     if canonical == KIMI_SURFACE:
         return KIMI_KEY
+    if canonical in _QWEN_HARNESSES:
+        return QWEN_KEY
     return _HARNESS_FAMILY.get(canonical) or PI_KEY
 
 
@@ -113,8 +123,8 @@ def harness_is_configured(harness: str) -> bool:
     break working launches.
 
     :param harness: A harness id, e.g. ``"claude-native"``, ``"codex"``,
-        ``"openai-agents"``, ``"agents_sdk"``, ``"pi"``, or
-        ``"pi-native"``.
+        ``"openai-agents"``, ``"agents_sdk"``, ``"pi"``, ``"pi-native"``,
+        ``"qwen"``, or ``"qwen-code"``.
     :returns: ``True`` when launchable (CLI installed, or a harness the
         daemon doesn't gate); ``False`` only when a CLI-wrapping
         harness's binary is missing from ``PATH``.
@@ -149,6 +159,7 @@ def harness_is_configured(harness: str) -> bool:
         canonical not in _HARNESS_FAMILY
         and canonical not in _PI_HARNESSES
         and canonical != KIMI_SURFACE
+        and canonical not in _QWEN_HARNESSES
     ):
         # Unknown harness — the daemon has no install metadata for it, so
         # it can't assess readiness. Fail open (custom/newer harnesses,
@@ -168,13 +179,14 @@ def configured_harness_map() -> dict[str, bool]:
 
     :returns: Mapping of harness spelling to readiness, e.g.
         ``{"claude-native": False, "codex-native": False,
-        "claude-sdk": True, "openai-agents": True, "pi": True}``.
+        "claude-sdk": True, "openai-agents": True, "pi": True, "qwen": True}``.
     """
     spellings: set[str] = set(_HARNESS_FAMILY)
     spellings.update(_EXECUTOR_TYPE_HARNESS_ALIASES)
     spellings.update(HARNESS_ALIASES)
     spellings.update(_PI_HARNESSES)
     spellings.update(_CURSOR_NATIVE_HARNESSES)
+    spellings.update(_QWEN_HARNESSES)
     spellings.add(CURSOR_KEY)
     spellings.add(KIMI_SURFACE)
     return {spelling: harness_is_configured(spelling) for spelling in spellings}

@@ -18,6 +18,8 @@ HARNESS_ALIASES: dict[str, str] = {
     # User-facing spelling for Moonshot AI's Kimi Code CLI; the canonical id
     # is "kimi" (matches the binary and the registry / workflow type).
     "kimi-code": "kimi",
+    # Qwen Code harness alias.
+    "qwen-code": "qwen",
 }
 
 # Canonical native-CLI harness spellings. These harnesses type messages into

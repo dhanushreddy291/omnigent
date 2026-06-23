@@ -145,6 +145,9 @@ def test_configured_harness_map_covers_all_spellings(
         # Kimi Code CLI + alias.
         "kimi",
         "kimi-code",
+        # Qwen harnesses
+        "qwen",
+        "qwen-code",
     }
     assert set(result) == expected_keys
 
@@ -187,6 +190,7 @@ def test_configured_harness_map_gates_only_cli_harnesses(
         "kimi",
         "cursor-native",
         "native-cursor",
+        "qwen",
     ):
         assert result[cli] is False, f"{cli} should be gated on its CLI binary"
 

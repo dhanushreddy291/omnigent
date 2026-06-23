@@ -88,11 +88,12 @@ OMNIGENT_HARNESSES = frozenset(
         "open-responses",
         "pi",
         "pi-native",
+        "qwen",
     },
 )
 # User-facing aliases accepted in specs and normalized before runtime dispatch.
 OMNIGENT_HARNESS_ALIASES = frozenset(
-    {"claude", "native-pi", "openai-agents-sdk", "agy", "google-antigravity", "kimi-code"}
+    {"claude", "native-pi", "openai-agents-sdk", "agy", "google-antigravity", "kimi-code", "qwen-code"}
 )
 _OMNIGENT_ACCEPTED_HARNESSES = OMNIGENT_HARNESSES | OMNIGENT_HARNESS_ALIASES
 
