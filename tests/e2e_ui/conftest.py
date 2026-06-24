@@ -910,49 +910,19 @@ def live_server(
     # match a content-based queue gets a generic reply (sufficient for tests
     # that only assert an assistant bubble appears, not its exact content).
     set_fallback_mock_llm(mock_url, "gpt-4o-mini", "Mock LLM response.")
-    # Fallbacks for native CLI models so forks into claude-native / codex-native
-    # get a benign response without per-test configuration.
-    set_fallback_mock_llm(mock_url, _CLAUDE_MOCK_MODEL, "Mock LLM response.")
+    # Fallbacks for native CLI models — native CLIs may use different model
+    # names than the provider config's models.default (e.g. codex 0.139
+    # uses gpt-4o from config, codex 0.140 uses its built-in gpt-5.5).
+    # Cover all known model names so any version gets a benign response.
+    set_fallback_mock_llm(mock_url, "gpt-4o", "Mock LLM response.")
     set_fallback_mock_llm(mock_url, "gpt-5.5", "Mock LLM response.")
-
-    # Write a session-scoped mock provider config so ANY native session
-    # (including forks into claude-native / codex-native) routes through
-    # the mock LLM. Per-test fixtures (native_*_mock_session) may
-    # overwrite this with per-harness settings, but this baseline ensures
-    # unexpected native boots (fork targets, clone targets) don't fail.
-    config_home = os.environ.get("OMNIGENT_CONFIG_HOME")
-    config_dir = Path(config_home) if config_home else Path.home() / ".omnigent"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    mock_config_path = config_dir / "config.yaml"
-    _original_config = mock_config_path.read_text() if mock_config_path.exists() else None
-    mock_config_path.write_text(
-        textwrap.dedent(f"""\
-        providers:
-          mock-llm:
-            kind: key
-            default: [anthropic, openai]
-            anthropic:
-              base_url: "{mock_url}"
-              api_key: "mock-key"
-              models:
-                default: {_CLAUDE_MOCK_MODEL}
-            openai:
-              base_url: "{mock_url}/v1"
-              api_key: "mock-key"
-              wire_api: responses
-              models:
-                default: {_CODEX_MOCK_MODEL}
-        """)
-    )
+    set_fallback_mock_llm(mock_url, _CLAUDE_MOCK_MODEL, "Mock LLM response.")
+    # Catch-all: any model not covered above still gets a response.
+    set_fallback_mock_llm(mock_url, "default", "Mock LLM response.")
 
     try:
         yield base_url
     finally:
-        # Restore the original provider config (or remove our mock config).
-        if _original_config is not None:
-            mock_config_path.write_text(_original_config)
-        else:
-            mock_config_path.unlink(missing_ok=True)
         _server_state.clear()
         if runner_proc.poll() is None:
             runner_proc.send_signal(signal.SIGTERM)
