@@ -6,8 +6,8 @@ native — goose has already returned it to the model by the time the
 completes, evaluate it against Omnigent's tool-RESULT policy
 (``PHASE_TOOL_RESULT``) and record the decision, logging a warning when a result
 would have been denied. This is the honest best-effort for the result checkpoint
-on a TUI-mirror harness; the tool-CALL checkpoint IS enforced live (see
-:mod:`omnigent.goose_native_permissions`).
+on a TUI-mirror harness; the tool-CALL checkpoint IS enforced live (the goose
+``PreToolUse`` policy hook, :mod:`omnigent.inner.goose_policy_hook`).
 
 ``POST /policies/evaluate`` parks an approval gate only for the TOOL_CALL /
 LLM_REQUEST / REQUEST phases — NOT TOOL_RESULT — so this evaluation is

@@ -1989,11 +1989,25 @@ async def _auto_create_goose_terminal(
     from omnigent.codex_native_bridge import write_mcp_bridge_config
     from omnigent.goose_native_bridge import (
         goose_mcp_extension_value,
+        isolated_goose_sessions_db,
+        setup_goose_isolated_home,
         write_goose_mcp_launcher,
+        write_goose_policy_plugin,
     )
 
     await asyncio.to_thread(write_mcp_bridge_config, bridge_dir)
     await asyncio.to_thread(write_goose_mcp_launcher, bridge_dir)
+
+    # Isolated per-session goose home (via GOOSE_PATH_ROOT): lets us register the
+    # Omnigent PreToolUse policy hook as a goose plugin WITHOUT touching the
+    # user's repo or real ~/.config/goose. Seeded from the user's config.yaml
+    # (provider/model/extensions); the API key resolves via the OS keyring, which
+    # is path-independent. goose then writes its sessions.db under this home, so
+    # the pollers must read the relocated path.
+    goose_home = await asyncio.to_thread(setup_goose_isolated_home, bridge_dir)
+    await asyncio.to_thread(write_goose_policy_plugin, bridge_dir)
+    goose_sessions_db = isolated_goose_sessions_db(bridge_dir)
+    server_url = _required_runner_env("RUNNER_SERVER_URL")
 
     # ``_pi_native_launch_config`` is a generic session-snapshot reader
     # (workspace + terminal_launch_args); reused here, not Pi-specific.
@@ -2026,17 +2040,21 @@ async def _auto_create_goose_terminal(
             )
 
     goose_command = resolve_goose_executable()
-    # GOOSE_MODE=approve so Goose prompts in its TUI before EVERY tool. This is
-    # required for complete Omnigent-policy interception: smart_approve lets Goose
-    # auto-allow "safe" tools WITHOUT prompting, and those calls would bypass the
-    # approval mirror (and thus Omnigent policy). With `approve`, every tool stops
-    # at the cliclack gate, which the mirror drives from the Omnigent policy
-    # verdict (see :mod:`omnigent.goose_native_permissions`). Provider/model come
-    # from `goose configure`.
+    # GOOSE_MODE=auto: goose runs tools without its own in-TUI confirmation — the
+    # Omnigent PreToolUse policy hook (a plugin in the isolated home) is the gate
+    # now, blocking on a DENY verdict whether the turn came from the web composer
+    # OR was typed directly into the embedded terminal (goose's PreToolUse hook is
+    # blocking). GOOSE_PATH_ROOT isolates goose's home so the policy plugin is
+    # discovered without touching the user's repo/config; ``_OMNIGENT_*`` let the
+    # hook reach the policy endpoint (it inherits this env). Provider/model/auth
+    # come from the user's config.yaml (seeded into the home) + OS keyring.
     goose_env: dict[str, str] = {
         "GOOSE_CLI_THEME": "ansi",
         "GOOSE_TELEMETRY_OFF": "1",
-        "GOOSE_MODE": "approve",
+        "GOOSE_MODE": "auto",
+        "GOOSE_PATH_ROOT": str(goose_home),
+        "_OMNIGENT_SERVER_URL": server_url,
+        "_OMNIGENT_SESSION_ID": session_id,
     }
     # Launch-unique Goose session name. `goose session --name X` (without
     # --resume) creates a NEW sessions row each launch (verified, Goose 1.38),
@@ -2067,9 +2085,10 @@ async def _auto_create_goose_terminal(
             args=goose_args,
             # ANSI theme keeps the pane cheap to scrape; GOOSE_TELEMETRY_OFF
             # suppresses Goose's first-run "share usage data?" prompt, which
-            # would otherwise block the headless pane on a fresh install;
-            # GOOSE_MODE=smart_approve turns on Goose's own in-TUI approval. Goose's
-            # provider/model come from the user's own `goose configure` (KTD4).
+            # would otherwise block the headless pane on a fresh install. Tool
+            # gating is the Omnigent PreToolUse policy hook (GOOSE_MODE=auto, no
+            # in-TUI prompt). Provider/model/auth come from the user's config
+            # seeded into the isolated home + OS keyring (see goose_env above).
             env=goose_env,
             scrollback=100_000,
             tmux_allow_passthrough=True,
@@ -2101,12 +2120,11 @@ async def _auto_create_goose_terminal(
     # server URL + refresh-capable auth.
     from omnigent.runner._entry import _make_auth_token_factory, _RunnerDatabricksAuth
 
-    server_url = _required_runner_env("RUNNER_SERVER_URL")
+    # ``server_url`` was resolved above (for the policy-hook env).
     _runner_auth = _RunnerDatabricksAuth(_make_auth_token_factory())
 
     from omnigent.goose_native_audit import supervise_goose_audit_forwarder
     from omnigent.goose_native_forwarder import supervise_goose_forwarder
-    from omnigent.goose_native_permissions import supervise_goose_approval_mirror
     from omnigent.goose_native_usage import supervise_goose_usage_forwarder
 
     if server_client is not None and ensure_comment_relay is not None:
@@ -2117,17 +2135,18 @@ async def _auto_create_goose_terminal(
         )
 
     async def _supervise_goose_native_bridges() -> None:
-        """Run the goose-native bridges together (forwarder/policy/usage/audit).
+        """Run the goose-native bridges together (forwarder/usage/audit).
 
         All are per-session, runner-owned, restart-on-failure; gathering them
         under one task keeps a single registration/cancellation handle for
         teardown. The forwarder mirrors Goose's transcript onto the conversation;
-        the approval mirror enforces Omnigent policy on Goose's cliclack
-        tool-confirmation gate (see :mod:`omnigent.goose_native_permissions`); the
-        usage poller mirrors Goose's accumulated token/cost totals onto the
+        the usage poller mirrors Goose's accumulated token/cost totals onto the
         session-cost badge (see :mod:`omnigent.goose_native_usage`); the audit
         poller records tool-RESULT policy decisions (observability only — goose
         has no post-exec hook to block on; see :mod:`omnigent.goose_native_audit`).
+        Tool-CALL policy enforcement is NOT here — it's the goose PreToolUse
+        plugin hook (:mod:`omnigent.inner.goose_policy_hook`), which blocks inside
+        goose's own loop. All three pollers read the isolated home's sessions.db.
         """
         await asyncio.gather(
             supervise_goose_forwarder(
@@ -2137,14 +2156,7 @@ async def _auto_create_goose_terminal(
                 bridge_dir=bridge_dir,
                 agent_name="goose-native-ui",
                 goose_session_name=goose_session_name,
-                auth=_runner_auth,
-            ),
-            supervise_goose_approval_mirror(
-                base_url=server_url,
-                headers={},
-                session_id=session_id,
-                bridge_dir=bridge_dir,
-                goose_session_name=goose_session_name,
+                db_path=goose_sessions_db,
                 auth=_runner_auth,
             ),
             supervise_goose_usage_forwarder(
@@ -2153,6 +2165,7 @@ async def _auto_create_goose_terminal(
                 session_id=session_id,
                 bridge_dir=bridge_dir,
                 goose_session_name=goose_session_name,
+                db_path=goose_sessions_db,
                 auth=_runner_auth,
             ),
             supervise_goose_audit_forwarder(
@@ -2161,6 +2174,7 @@ async def _auto_create_goose_terminal(
                 session_id=session_id,
                 bridge_dir=bridge_dir,
                 goose_session_name=goose_session_name,
+                db_path=goose_sessions_db,
                 auth=_runner_auth,
             ),
         )
@@ -2171,7 +2185,8 @@ async def _auto_create_goose_terminal(
     )
     _register_auto_forwarder_task(session_id, _forwarder_task)
     _logger.info(
-        "Auto-created goose terminal + forwarder/approval-mirror for session %s; task=%s",
+        "Auto-created goose terminal + forwarder/usage/audit (policy via PreToolUse hook) "
+        "for session %s; task=%s",
         session_id,
         _forwarder_task.get_name(),
     )

@@ -27,8 +27,9 @@ goose-native is an **observe-and-relay** harness:
 - **TUI → Web** — `goose_native_forwarder.py` tails goose's SQLite store
   (`~/.local/share/goose/sessions/sessions.db`) and mirrors **completed** messages
   back as `external_conversation_item` events (poll cadence 0.4s).
-- **Approvals** — `goose_native_permissions.py` scrapes goose's in-terminal
-  `cliclack` approval prompt and mirrors it to a web elicitation card.
+- **Approvals** — a goose `PreToolUse` plugin hook
+  (`inner/goose_policy_hook.py`) evaluates each tool call against Omnigent policy
+  and blocks on DENY; ASK surfaces a web card via `/policies/evaluate` (see §3).
 
 The store flushes **one row per completed step** (no token deltas), and goose's
 TUI exposes **no structured side-channel** for permissions, reasoning, or
@@ -71,137 +72,95 @@ That is why streaming/policy/compaction are clean there.
 verdicts — ALLOW / ASK / DENY — at the tool-call checkpoint, surfacing ASK as a
 web approval card and blocking DENY before the tool runs.
 
-**Why it looked blocked:** tools execute *inside* goose's own agent loop, and
-goose has **no tool-hook system** (unlike Claude Code's `PreToolUse`). So there
-is no callback to register an Omnigent policy check on.
+**Correction (live testing).** An earlier draft of this plan claimed "goose has
+no tool-hook system" and built a brittle `cliclack`-screen-scrape mirror around
+`GOOSE_MODE=approve`. **That was wrong.** goose ships a full **Claude-Code-style
+hook system** (`crates/goose/src/hooks/mod.rs`): events include `PreToolUse`,
+`PostToolUse`, `UserPromptSubmit`, `Stop`, …; hook commands receive the event
+JSON on stdin and **block** by printing `{"decision":"block","reason":"…"}`.
+`PreToolUse` is dispatched **blocking** (`emit_blocking`, `agent.rs:1066` →
+`HookDecision::Deny` skips the tool). So the right mechanism is goose's own hook
+— the same path claude-/hermes-native use — not screen-scraping. The scrape
+mirror has been **removed**.
 
-**Why it is actually solvable:** goose *does* gate tools in-terminal via
-`cliclack`, and we already intercept that prompt. The fix is to stop treating
-the prompt as "ask a human" and start treating it as "enforce Omnigent policy,
-escalate to a human only on ASK." Three facts make this work:
-
-1. **`GOOSE_MODE=approve` forces a prompt on *every* tool.** Verified against
-   `permission_inspector.rs` test `approve_requires_approval`
-   (`GooseMode::Approve` + no cached permission → `RequireApproval`). By contrast
-   `smart_approve` lets goose auto-allow "safe" tools *without prompting* — those
-   calls would never reach the mirror. **Today the runner launches
-   `GOOSE_MODE=smart_approve`** (`runner/app.py:1987`), which is the real reason
-   policy is incomplete: silently-allowed tools bypass interception entirely.
-2. **The structured tool call is in the store.** goose persists each call as a
-   `ToolRequest { tool_call: CallToolRequestParams }` =
-   `{name, arguments}` (`message.rs:82`), so we get the exact tool name + args
-   from `sessions.db` — no scraping args off the screen.
-3. **`POST /policies/evaluate` already does ALLOW / ASK / DENY end-to-end.**
-   The route (`sessions.py:15178`) evaluates the policy engine and, on ASK,
-   calls `_hold_native_ask_gate` (`sessions.py:3907`, invoked at `:15366`) which
-   **publishes the approval card, parks for the web verdict, and returns a hard
-   ALLOW/DENY**. One call collapses the trichotomy to a binary. The request
-   shape is already built by
-   `native_policy_hook.hook_payload_to_evaluation_request("PreToolUse", …)`
-   → `PHASE_TOOL_CALL { name, arguments }`.
-
-### 3.1 Design
-
-Turn the approval mirror into a **policy enforcement point**:
+### 3.1 Design — a goose `PreToolUse` plugin hook
 
 ```
-GOOSE_MODE=approve  → goose prompts on EVERY tool (cliclack), blocks until answered
+GOOSE_MODE=auto  → goose runs tools with NO in-TUI prompt; the hook is the gate
         │
-   mirror detects pending prompt (existing pane poll)
+   goose fires PreToolUse (blocking) before EVERY tool, from web OR terminal turns
         │
-   read latest pending toolRequest from sessions.db → {name, arguments}   (structured)
+   plugin hook: omnigent.inner.goose_policy_hook  (stdin = {event, tool_name, tool_input})
         │
    POST /v1/sessions/{id}/policies/evaluate   (PHASE_TOOL_CALL)
         │
    ┌─────────────┬───────────────────────────┬──────────────────┐
- ALLOW          ASK (engine holds gate,      DENY            (eval error)
+ ALLOW/UNSPEC    ASK (engine holds gate,      DENY            (net error)
    │             renders web card, waits)      │                  │
- drive "Allow"   returns hard ALLOW/DENY →    drive "Deny"     drive "Deny"
- (Enter)         drive accordingly            (block)          (fail-closed)
+ print {}        returns hard ALLOW/DENY      print block      print block
+ (allow)         → print {} or block          (deny)           (fail-closed)
 ```
 
-Key properties:
+- **Real enforcement, both input sources.** `PreToolUse` fires inside goose's
+  own loop, so it gates a tool whether the turn came from the web composer **or**
+  was typed into the embedded terminal. `{"decision":"block"}` truly stops the
+  call — no scraping, no `approve`-mode prompt flicker.
+- **ASK → web card.** `/policies/evaluate` resolves ASK server-side
+  (`_hold_native_ask_gate`, `sessions.py:3907`): it publishes the approval card,
+  parks the hook's HTTP request until the human answers, and returns a hard
+  ALLOW/DENY. The hook is synchronous (read-timeout 1 day), so this Just Works.
+- **Registration via an isolated home.** goose discovers hooks from a plugin's
+  `<plugins_dir>/<name>/hooks/hooks.json`. To register ours without touching the
+  user's repo or real `~/.config/goose`, the runner sets **`GOOSE_PATH_ROOT`** to
+  a per-session home under the bridge dir (rebases config/data/plugins) and
+  writes the plugin there. The home is seeded by copying the user's
+  `~/.config/goose/config.yaml` (provider/model/extensions); the API key resolves
+  via the OS keyring (path-independent). goose's sessions.db relocates under the
+  home, so the forwarder/usage/audit pollers are pointed at it.
+- **Fail-closed.** Network error / retry exhaustion → the hook prints
+  `block` (deny). A truly-unexpected hook crash fails open (goose proceeds) — the
+  same contract as `hermes_policy_hook`.
 
-- **Real enforcement.** With `approve` mode, goose physically cannot run the
-  tool until the cliclack selector is answered. Driving "Deny" *blocks
-  execution* — true DENY, not advisory.
-- **Human only on ASK.** No-policy / ALLOW verdicts auto-drive "Allow" with no
-  card. The engine's default for an unmatched call is ALLOW, so a session with
-  no policies configured runs goose freely (parity with headless).
-- **Unifies policy + elicitation.** The ASK card is now rendered by the policy
-  engine from the **structured** tool name/args (better preview than today's
-  scraped subject), and the existing `native-permission-request` blind-ask path
-  is retired in favor of `/policies/evaluate`.
-- **Fail-closed.** Eval error / mirror crash → the tool stays blocked at the
-  cliclack prompt (a human can still answer in the terminal — existing
-  fallback). This matches the `native_policy_hook` fail-closed contract.
+### 3.2 What changed
 
-### 3.2 What changes
-
-- `runner/app.py:1987` — `GOOSE_MODE`: `smart_approve` → **`approve`** (with a
-  comment explaining it is required for complete policy interception). This is
-  the single most important change.
-- `goose_native_forwarder.py` (or a small shared helper) — add
-  `read_pending_tool_request(db_path, session) -> {name, arguments} | None`
-  that returns the most recent `toolRequest` not yet paired with a
-  `toolResponse` (the call awaiting approval).
-- `goose_native_permissions.py` — between "prompt detected" and "drive
-  selector," call `/policies/evaluate` with the structured call and branch on
-  the verdict. Keep the pane scrape only as the **liveness signal** (is a prompt
-  showing?) and the **actuator** (drive Allow/Deny); the *decision* moves to the
-  engine. Retire the hardcoded `policy_name="goose_native_permission"` blind ask.
-- Tests: unit-test the verdict→keystroke mapping (ALLOW→Enter, DENY→Down×N+Enter,
-  ASK→card-then-drive, error→fail-closed) and the pending-toolRequest reader.
+- `inner/goose_policy_hook.py` (new) — the `PreToolUse` entrypoint; near-copy of
+  `inner/hermes_policy_hook.py`. Reads `_OMNIGENT_SERVER_URL` /
+  `_OMNIGENT_SESSION_ID` from the inherited env, POSTs `PHASE_TOOL_CALL` via
+  `native_policy_hook.post_evaluate_with_retry`, maps DENY/ASK → block.
+- `goose_native_bridge.py` — `setup_goose_isolated_home` (GOOSE_PATH_ROOT seed),
+  `write_goose_policy_plugin` (the `hooks.json`), `isolated_goose_sessions_db`.
+- `runner/app.py` — `GOOSE_MODE=auto`; set `GOOSE_PATH_ROOT` + `_OMNIGENT_*`;
+  seed home + write plugin before launch; thread the isolated `db_path` to the
+  three pollers. The cliclack-scrape mirror (`goose_native_permissions.py`) and
+  its `approve`-mode are **removed**.
+- `claude_native_bridge.py` — add the goose-native bridge root to the `serve-mcp`
+  allowlist (`_trusted_parent_for_bridge_dir`) so the Omnigent MCP extension can
+  boot (found in live testing).
 
 ### 3.3 Honest residual limits
 
-- **Request-phase / turn-level policies only gate WEB-originated turns, not the
-  terminal.** goose has no pre-turn hook, so a turn the user types *directly into
-  the embedded terminal* never reaches Omnigent before goose processes it — it
-  bypasses every request-phase gate (input policies, `cost_budget`'s
-  request-phase check). Omnigent's only live chokepoint on native is the
-  tool-call cliclack gate (the mirror), which catches **tool calls** but not a
-  text-only terminal turn. Web-composer turns *are* gated (the server's
-  `_evaluate_input_policy` at POST /events). **Consequence for cost budgets:**
-  enforcement holds on web turns + on tool calls, but a terminal text turn runs
-  ungated. This is fundamental to the TUI-mirror model — for guaranteed
-  turn-level / cost-budget enforcement use the headless `goose` harness (it owns
-  the turn loop, so every turn is gated). Two related sharp edges:
-  (a) the builtin `cost_budget` `max_cost_usd` is a *downgrade gate* — it only
-  DENYs while on an `expensive_models` model (defaults: opus/gpt-5/…), so a bare
-  cap with no matching model never hard-stops; and (b) the policy engine sees the
-  *spec* model, not goose's actual `goose configure` model, so expensive-model
-  matching is unreliable on native unless goose's live model is surfaced to the
-  engine (a `external_model_change` post — not yet wired).
-- **Tool-*result* checkpoint is not enforceable on native.** goose's cliclack
-  only prompts *before* execution; there is no post-execution hook, so
-  `PHASE_TOOL_RESULT` ASK/DENY cannot *block* a result goose has already
-  returned to the model. We can post-hoc evaluate the `toolResponse` row for
-  **audit/observability**, but not enforcement. The headless harness enforces
-  both checkpoints. This is a goose limitation (no post-tool hook). **Done
-  (observability only):** `goose_native_audit.py` polls completed `toolResponse`
-  rows, correlates each to its `toolRequest` (name + args), and POSTs
-  `PHASE_TOOL_RESULT` to `/policies/evaluate`. That endpoint parks an approval
-  gate only for TOOL_CALL/LLM_REQUEST/REQUEST — NOT TOOL_RESULT — so the eval is
-  side-effect-free (no spurious prompt for a result that already ran). The
-  evaluation is recorded server-side; a non-allow verdict logs a runner warning.
-  It cannot *block* (goose already returned the result to the model).
-- **Latency / chattiness.** `approve` mode prompts on every tool; each adds a
-  policy round-trip + a cliclack drive. **Decision (v1):** `GOOSE_MODE=approve`
-  is set **unconditionally** — NOT gated on whether policies exist. Gating it
-  ("smart_approve when no policies") would open a correctness hole: a policy
-  added mid-session via `sys_add_policy` wouldn't enforce on tools goose
-  auto-allows. The per-tool cost is the price of the always-enforce guarantee.
-  The eval round-trip is localhost-cheap — the engine short-circuits no-agent →
-  `UNSPECIFIED` and no-match → `ALLOW` without an LLM call — so a separate
-  caching fast-path is deferred (it adds staleness risk for little gain; the
-  dominant cost is the inherent prompt-drive cycle, which the fast-path can't
-  remove). Verdict mapping: `ALLOW`/`UNSPECIFIED` → drive Allow; `DENY` → drive
-  Deny; transport/parse error → fail-closed Deny.
-- **Scrape brittleness remains** for prompt *detection* and *actuation* (the
-  cliclack strings are stable per the source, but it is still screen-driving).
-  The decision path is now robust (structured + engine); only the actuator is
-  scrape-based.
+- **Text-only TERMINAL turns can't be *request-phase* blocked.** goose's
+  `UserPromptSubmit` hook is dispatched **non-blocking** (`.emit()`, not
+  `emit_blocking` — `agent.rs:1582,1906`), so unlike Claude Code's, it cannot
+  veto a turn before the model runs. A turn typed into the embedded terminal that
+  produces only text (no tool call) therefore bypasses request-phase gates
+  (input policies, `cost_budget`'s request check). Tool calls in such a turn
+  **are** gated (`PreToolUse`), and web-composer turns are gated server-side
+  (`_evaluate_input_policy`). So cost-budget enforcement holds on web turns and
+  on any tool-bearing turn, but a text-only terminal turn runs ungated. For
+  guaranteed turn-level enforcement, the headless `goose` harness owns the turn
+  loop. Two related cost-budget sharp edges: (a) the builtin `cost_budget`
+  `max_cost_usd` is a *downgrade gate* — only DENYs on an `expensive_models`
+  model (defaults opus/gpt-5/…), so a bare cap never hard-stops; (b) the engine
+  sees the *spec* model, not goose's `goose configure` model, so expensive-model
+  matching needs goose's live model surfaced (`external_model_change` — not yet
+  wired). **Follow-up candidates:** a non-blocking `UserPromptSubmit` *audit*
+  hook, and surfacing goose's live model.
+- **Tool-*result* checkpoint is audit-only.** No goose post-exec hook can block a
+  result already returned to the model. `goose_native_audit.py` evaluates
+  `PHASE_TOOL_RESULT` for the record (side-effect-free — that phase doesn't park
+  a gate) and logs a non-allow verdict. The headless harness enforces both
+  checkpoints.
 
 ---
 
@@ -337,7 +296,7 @@ Tier-2 PR if this one grows too large to review.
 
 | Group | Items | Effort | Risk |
 |---|---|---|---|
-| **Policy** (§3) | `GOOSE_MODE=approve`; pending-toolRequest reader; mirror→`/policies/evaluate`; no-policy fast-path; tests | ~3–4 days | medium (scrape actuator) |
+| **Policy** (§3) | goose `PreToolUse` plugin hook → `/policies/evaluate`; isolated `GOOSE_PATH_ROOT` home; tests | done | low (native hook) |
 | **MCP** (§5.1) | `--with-streamable-http-extension` at launch; `mcp__omnigent__*` skip in the §3 gate | ~2–3 days | medium |
 | **Tier-1** (§4) | reasoning → model-launch → cost → fork | ~5–6 days | low–medium |
 
