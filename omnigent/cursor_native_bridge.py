@@ -23,13 +23,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+from omnigent._platform import stable_user_id
+
 #: Env var carrying the bridge dir into the harness executor process.
 BRIDGE_DIR_ENV_VAR = "HARNESS_CURSOR_NATIVE_BRIDGE_DIR"
 
-_BRIDGE_ROOT = Path(os.environ.get("TMPDIR", "/tmp")) / f"omnigent-{os.getuid()}" / "cursor-native"
+_BRIDGE_ROOT = Path(tempfile.gettempdir()) / f"omnigent-{stable_user_id()}" / "cursor-native"
 _TMUX_FILE = "tmux.json"
 _BRIDGE_CONFIG_FILE = "bridge.json"
 _MCP_CONFIG_FILE = "mcp.json"
+_HOOKS_CONFIG_FILE = "hooks.json"
 _MCP_SERVER_NAME = "omnigent"
 _CURSOR_AUTO_APPROVE_TOOLS = [
     "list_comments",
@@ -68,6 +71,17 @@ _PASTE_BUFFER = "omnigent-cursor-paste"
 # sending Enter — submitting before the TUI commits the paste folds the Enter
 # into the paste as a newline and the message sits unsent.
 _PASTE_COMMIT_TIMEOUT_S = 5.0
+# Pause between the ``/model`` filter landing and Enter. cursor-agent's
+# composer debounces input (~1.5s); an Enter fired too soon selects a stale
+# picker highlight. See the cursor-native e2e_ui TUI-driving notes.
+_MODEL_PICKER_SETTLE_S = 1.5
+# ``/model`` picker filter-result markers. cursor prints ``Models matching
+# "<query>"`` above the matched rows, or ``No matches`` when the id resolves to
+# nothing. These distinguish a landed filter from the echoed ``/model <id>``
+# composer text (which always contains the id), so the readiness gate verifies
+# the picker actually matched rather than passing instantly off the echo.
+_PICKER_MATCH_MARKER = "Models matching"
+_PICKER_NO_MATCH_MARKER = "No matches"
 # cursor-agent TUI markers (Phase 0): idle input placeholder / running footer /
 # first-run trust modal.
 _IDLE_MARKERS = ("Plan, search, build", "Add a follow-up")
@@ -178,6 +192,59 @@ def write_mcp_config(
     os.replace(tmp, path)
     enable_mcp_for_workspace(workspace)
     allow_mcp_tools_in_cli_config()
+    return path
+
+
+def build_hooks_config(
+    bridge_dir: Path, *, python_executable: str | None = None
+) -> dict[str, Any]:
+    """Build Cursor's ``.cursor/hooks.json`` registering the usage ``stop`` hook.
+
+    cursor-agent fires the ``stop`` hook once per completed turn with a JSON
+    payload (on stdin) carrying that turn's token usage — the only surface where
+    the interactive TUI exposes usage. The hook command runs
+    ``omnigent.cursor_native_usage record-usage``, which appends the usage to
+    ``<bridge_dir>/cursor_usage.jsonl`` for the runner's usage forwarder to tail
+    and post as ``external_session_usage`` (lighting up the web Session-cost
+    badge). Bakes the absolute ``--bridge-dir`` so the recorder writes where the
+    forwarder reads, regardless of the hook's working directory.
+    """
+    import shlex
+
+    python = python_executable or sys.executable
+    command = " ".join(
+        shlex.quote(part)
+        for part in (
+            python,
+            "-I",
+            "-m",
+            "omnigent.cursor_native_usage",
+            "record-usage",
+            "--bridge-dir",
+            str(bridge_dir),
+        )
+    )
+    return {"version": 1, "hooks": {"stop": [{"command": command}]}}
+
+
+def write_hooks_config(
+    workspace: Path,
+    bridge_dir: Path,
+    *,
+    python_executable: str | None = None,
+) -> Path:
+    """Write the workspace-scoped Cursor ``hooks.json`` capturing per-turn usage.
+
+    Sibling of :func:`write_mcp_config`: project-scoped Cursor config the TUI
+    loads on launch in a trusted workspace. Returns the written path.
+    """
+    cursor_dir = workspace / ".cursor"
+    cursor_dir.mkdir(parents=True, exist_ok=True)
+    path = cursor_dir / _HOOKS_CONFIG_FILE
+    payload = build_hooks_config(bridge_dir, python_executable=python_executable)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
     return path
 
 
@@ -549,6 +616,78 @@ def inject_user_message(
                 break
             time.sleep(_POLL_INTERVAL_S)
     time.sleep(_PASTE_SETTLE_S)
+    _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
+
+
+def inject_model_command(
+    bridge_dir: Path,
+    *,
+    model: str,
+    timeout_s: float = _TMUX_READY_TIMEOUT_S,
+) -> None:
+    """Switch the live Cursor model by driving the TUI ``/model`` picker.
+
+    cursor-agent's ``--model`` flag is baked in at spawn, so a web-UI / REPL
+    model switch on a *running* pane can't be applied by re-reading the
+    persisted ``model_override`` — it has to be typed into the TUI. Typing
+    ``/model <id>`` opens cursor-agent's model picker filtered to *model* and
+    Enter selects the (now top) match; verified live that an exact model id
+    selects exactly that model (e.g. ``gpt-5.2`` → "GPT-5.2 Medium"). This is
+    the cursor analog of claude-native's ``inject_slash_command('/model …')``.
+
+    :param bridge_dir: The cursor-native bridge dir holding ``tmux.json``.
+    :param model: cursor-agent model id, e.g. ``"gpt-5.2"`` (the same ids
+        ``cursor-agent --list-models`` reports).
+    :param timeout_s: Per-readiness-gate timeout.
+    :raises RuntimeError: If the tmux target is never advertised, the TUI has
+        exited, a tmux command fails, or the picker reports no match for *model*
+        (an unavailable/typo'd id) — in which case the picker is dismissed and
+        the model is left unchanged rather than mis-selected.
+    """
+    model = model.strip()
+    if not model:
+        raise RuntimeError("cursor-native model switch requires a non-empty model id")
+    info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
+    socket_path = info["socket_path"]
+    tmux_target = info["tmux_target"]
+    if not _session_alive(socket_path, tmux_target):
+        raise RuntimeError(
+            "cursor terminal is no longer running (the TUI exited); restart the session"
+        )
+    _settle_pane(socket_path, tmux_target, timeout_s=timeout_s)
+    # Clear any leftover draft so the slash command isn't appended to it.
+    # cursor-agent's composer ignores the readline C-a/C-k keys, so this floods
+    # Backspace (see _clear_composer); a bare "/model <id>" is what opens the
+    # picker, whereas "<draft>/model <id>" would not.
+    _clear_composer(socket_path, tmux_target)
+    # ``-l`` sends the command as literal characters so ``/`` opens the slash
+    # menu and the id filters the picker rather than being parsed as key names.
+    _run_tmux(socket_path, "send-keys", "-t", tmux_target, "-l", f"/model {model}")
+    # Gate on the picker's *filter result*, not the echoed command: the composer
+    # line itself contains ``model``, so a naive ``model in pane`` check passes
+    # instantly off the echo and never confirms a match landed. Poll for cursor's
+    # "Models matching" header (≥1 match) or "No matches", then settle so the
+    # highlight stabilizes before Enter. The composer debounces input (~1.5s), so
+    # both the filter and the highlight need time to resolve.
+    deadline = time.monotonic() + _PASTE_COMMIT_TIMEOUT_S
+    while time.monotonic() < deadline:
+        pane = _capture_pane(socket_path, tmux_target)
+        if _PICKER_NO_MATCH_MARKER in pane or _PICKER_MATCH_MARKER in pane:
+            break
+        time.sleep(_POLL_INTERVAL_S)
+    time.sleep(_MODEL_PICKER_SETTLE_S)
+    # Re-read after the settle: a transient "No matches" can flash mid-filter,
+    # and a real match may only resolve once the debounce fires.
+    if _PICKER_NO_MATCH_MARKER in _capture_pane(socket_path, tmux_target):
+        # Dismiss the picker and clear the composer so the literal "/model <id>"
+        # can't be submitted as a chat message, then fail loudly so the web
+        # surfaces an honest error instead of silently selecting nothing.
+        _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Escape")
+        _clear_composer(socket_path, tmux_target)
+        raise RuntimeError(
+            f"cursor model {model!r} is not available in the picker (no match); "
+            "the model was not switched"
+        )
     _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Enter")
 
 
