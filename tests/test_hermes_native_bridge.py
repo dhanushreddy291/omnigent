@@ -142,6 +142,37 @@ def test_send_pane_keys_raises_without_target(tmp_path, monkeypatch) -> None:
         b.send_hermes_pane_keys(tmp_path, "1")
 
 
+# -- Compress command injection tests --
+
+
+def test_inject_compress_command_sends_keys(tmp_path, monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def _fake_tmux(_socket_path, *args):
+        calls.append(args)
+
+    monkeypatch.setattr(b, "_run_tmux", _fake_tmux)
+    monkeypatch.setattr(
+        b, "read_tmux_info", lambda _d: {"socket_path": "/s", "tmux_target": "t"}
+    )
+    # _wait_for_tmux_info calls read_tmux_info internally, so patch it.
+    monkeypatch.setattr(
+        b, "_wait_for_tmux_info", lambda _d, timeout_s=30: {"socket_path": "/s", "tmux_target": "t"}
+    )
+    b.inject_compress_command(tmp_path)
+    assert calls == [
+        ("send-keys", "-t", "t", "C-u"),
+        ("send-keys", "-l", "-t", "t", "/compress"),
+        ("send-keys", "-t", "t", "Enter"),
+    ]
+
+
+def test_inject_compress_command_raises_without_target(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(b, "read_tmux_info", lambda _d: None)
+    with pytest.raises(RuntimeError):
+        b.inject_compress_command(tmp_path, timeout_s=0.1)
+
+
 # -- Policy hook config tests --
 
 

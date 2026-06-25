@@ -201,6 +201,28 @@ def write_policy_hook_config(
     return hermes_home
 
 
+def inject_compress_command(bridge_dir: Path, *, timeout_s: float = 5.0) -> None:
+    """Type ``/compress`` into the Hermes TUI pane.
+
+    Hermes' ``/compress`` slash command compacts the conversation context,
+    analogous to Claude Code's ``/compact``. This clears any draft the user
+    is mid-typing, pastes ``/compress`` literally, and submits with Enter.
+
+    :param bridge_dir: Per-session bridge dir holding ``tmux.json``.
+    :param timeout_s: How long to wait for ``tmux.json`` to appear.
+    :raises RuntimeError: If the tmux target is not advertised or send-keys fails.
+    """
+    info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
+    socket_path = info["socket_path"]
+    target = info["tmux_target"]
+    # Clear any draft the user is mid-typing.
+    _run_tmux(socket_path, "send-keys", "-t", target, "C-u")
+    # Paste ``/compress`` literally.
+    _run_tmux(socket_path, "send-keys", "-l", "-t", target, "/compress")
+    # Submit.
+    _run_tmux(socket_path, "send-keys", "-t", target, "Enter")
+
+
 def read_hermes_home(bridge_dir: Path) -> Path | None:
     """Return the per-session HERMES_HOME if it was previously written.
 

@@ -10777,6 +10777,36 @@ def create_runner_app(
         # Submit.
         _run_tmux(socket_path, "send-keys", "-t", target, "Enter")
 
+    async def _handle_hermes_native_compact(conv_id: str) -> Response:
+        """Type ``/compress`` into the Hermes TUI pane.
+
+        Hermes' ``/compress`` slash command compacts the conversation context,
+        analogous to Claude Code's ``/compact``. Returns 200 on successful
+        injection so the Omnigent server knows the control was handled in the
+        terminal and skips its own AP-side compaction.
+
+        :param conv_id: Session/conversation identifier.
+        :returns: 200 once ``/compress`` has been typed into the pane.
+            503 if the tmux target isn't yet advertised.
+        """
+        from omnigent.hermes_native_bridge import (
+            bridge_dir_for_session_id,
+            inject_compress_command,
+        )
+
+        bridge_dir = bridge_dir_for_session_id(conv_id)
+        try:
+            await asyncio.to_thread(inject_compress_command, bridge_dir, timeout_s=1.0)
+        except (RuntimeError, ValueError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "hermes_native_compact_failed",
+                    "detail": _client_safe_error_detail(exc, context="hermes-native compact"),
+                },
+            )
+        return Response(status_code=200)
+
     async def _handle_claude_native_cost_popup(
         conv_id: str,
         elicitation_id: str,
@@ -13681,6 +13711,8 @@ def create_runner_app(
                 return await _handle_codex_native_compact(conversation_id)
             if _session_harness_name(conversation_id) == "cursor-native":
                 return await _handle_cursor_native_compact(conversation_id)
+            if _session_harness_name(conversation_id) == "hermes-native":
+                return await _handle_hermes_native_compact(conversation_id)
             return Response(status_code=204)
 
         if body_type == "cost_approval_popup":
