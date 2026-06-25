@@ -1173,6 +1173,42 @@ def _build_claude_sdk_spawn_env(
     return env
 
 
+def _apply_legacy_databricks_routing(
+    env: dict[str, str],
+    *,
+    harness_type: AgentHarnessType,
+    profile: str | None,
+    model: str | None,
+) -> None:
+    """
+    Wire legacy Databricks/ucode routing for a harness with no resolved provider.
+
+    The fallback path shared by the codex / pi / qwen builders when
+    :func:`_resolve_provider_for_build` resolves no generic provider: enable the
+    gateway flag when a legacy ``executor.profile`` is set OR the model name
+    signals Databricks (``databricks-`` / ``databricks/``), thread the profile,
+    then delegate transport wiring to :func:`configure_agent_harness_with_ucode`.
+    The claude-sdk builder's fallback additionally handles the global ``auth:``
+    block and ApiKeyAuth, so it is not folded here; openai-agents has its own.
+
+    :param env: Mutable spawn-env dict, modified in place.
+    :param harness_type: Canonical harness type, e.g. ``"codex"``.
+    :param profile: The legacy ``~/.databrickscfg`` profile name, or ``None``.
+    :param model: The resolved spec model, used for the ``databricks-`` prefix
+        heuristic, or ``None``.
+    """
+    use_databricks = bool(profile) or (
+        model is not None and model.startswith(("databricks-", "databricks/"))
+    )
+    if use_databricks:
+        env[_HARNESS_GATEWAY_FLAG[harness_type]] = "true"
+        if profile:
+            env[_HARNESS_DATABRICKS_PROFILE[harness_type]] = str(profile)
+    configure_agent_harness_with_ucode(
+        env, str(profile) if profile else None, harness_type=harness_type
+    )
+
+
 def _build_codex_spawn_env(
     spec: AgentSpec,
     *,
@@ -1221,20 +1257,11 @@ def _build_codex_spawn_env(
     if provider is not None:
         configure_agent_harness_with_provider(env, provider, harness_type="codex")
     else:
-        # Same routing heuristic as the claude-sdk variant: profile set OR
-        # model starts with ``databricks-`` / ``databricks/``.
-        profile = spec.executor.config.get("profile")
-        use_databricks = bool(profile) or (
-            model is not None and model.startswith(("databricks-", "databricks/"))
-        )
-        if use_databricks:
-            env["HARNESS_CODEX_GATEWAY"] = "true"
-            if profile:
-                env["HARNESS_CODEX_DATABRICKS_PROFILE"] = str(profile)
-        configure_agent_harness_with_ucode(
+        _apply_legacy_databricks_routing(
             env,
-            str(profile) if profile else None,
             harness_type="codex",
+            profile=spec.executor.config.get("profile"),
+            model=model,
         )
         if "HARNESS_CODEX_GATEWAY" not in env and codex_config_provider_dismissed(load_config()):
             # No provider resolved and no gateway transport configured — the
@@ -1306,20 +1333,11 @@ def _build_pi_spawn_env(
     if provider is not None:
         configure_agent_harness_with_provider(env, provider, harness_type="pi")
     else:
-        # Same routing heuristic as the claude-sdk variant: profile set OR
-        # model starts with ``databricks-`` / ``databricks/``.
-        profile = spec.executor.config.get("profile")
-        use_databricks = bool(profile) or (
-            model is not None and model.startswith(("databricks-", "databricks/"))
-        )
-        if use_databricks:
-            env["HARNESS_PI_GATEWAY"] = "true"
-            if profile:
-                env["HARNESS_PI_DATABRICKS_PROFILE"] = str(profile)
-        configure_agent_harness_with_ucode(
+        _apply_legacy_databricks_routing(
             env,
-            str(profile) if profile else None,
             harness_type="pi",
+            profile=spec.executor.config.get("profile"),
+            model=model,
         )
     # Skills bridge — same shape as the claude-sdk + codex variants.
     # Always set so the harness wrap doesn't fall back to ``"all"``
@@ -1373,20 +1391,11 @@ def _build_qwen_spawn_env(
     if provider is not None:
         configure_agent_harness_with_provider(env, provider, harness_type="qwen")
     else:
-        # Same routing heuristic as the claude-sdk variant: profile set OR
-        # model starts with ``databricks-`` / ``databricks/``.
-        profile = spec.executor.config.get("profile")
-        use_databricks = bool(profile) or (
-            model is not None and model.startswith(("databricks-", "databricks/"))
-        )
-        if use_databricks:
-            env["HARNESS_QWEN_GATEWAY"] = "true"
-            if profile:
-                env["HARNESS_QWEN_DATABRICKS_PROFILE"] = str(profile)
-        configure_agent_harness_with_ucode(
+        _apply_legacy_databricks_routing(
             env,
-            str(profile) if profile else None,
             harness_type="qwen",
+            profile=spec.executor.config.get("profile"),
+            model=model,
         )
     # NB: no skills bridge for qwen yet. Unlike the claude-sdk / codex
     # variants, the qwen wrap (omnigent/inner/qwen_harness.py) and
