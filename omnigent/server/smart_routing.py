@@ -10,18 +10,23 @@ No per-agent YAML is needed: tiers are inferred from the harness family,
 and the feature is gated by the session's ``cost_control_mode_override``
 toggle ("on" = route, anything else = skip).
 
-Credentials are resolved from ``DATABRICKS_HOST`` / ``DATABRICKS_TOKEN``
-environment variables (the standard Databricks SDK auth chain).
+Server-side LLM credentials come from the same ``llm:`` block in the
+server config that policies use::
+
+    # config.yaml
+    llm:
+      model: databricks-claude-haiku-4-5
+      profile: <databricks-profile>
+
+The routing judge reuses the :class:`~omnigent.policies.types.PolicyLLMClient`
+built at startup from that config.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
-
-import httpx
 
 _logger = logging.getLogger(__name__)
 
@@ -93,65 +98,96 @@ def _build_rubric(tiers: dict[str, list[str]]) -> str:
     return _JUDGE_SYSTEM_TEMPLATE.format(tier_menu="\n".join(lines))
 
 
+# ── LLM client resolution ──────────────────────────────────────────────────
+
+# The routing judge reuses the server-level PolicyLLMClient built from
+# the ``llm:`` config block.  It's resolved lazily on first use and
+# cached for the process lifetime (same lifecycle as PolicyLLMClient).
+
+
+def _get_llm_client() -> Any | None:  # type: ignore[explicit-any]  # PolicyLLMClient
+    """Return the server-level PolicyLLMClient, or ``None``.
+
+    Resolved from :attr:`RuntimeCaps.llm` via the same builder the
+    policy engine uses.  Returns ``None`` when the server config has
+    no ``llm:`` block — routing is silently disabled.
+    """
+    try:
+        from omnigent.runtime import get_runtime_caps
+    except ImportError:
+        return None
+    caps = get_runtime_caps()
+    if caps is None:
+        return None
+    server_llm = caps.llm
+    if server_llm is None:
+        _logger.debug("smart_routing: no server llm config; routing disabled")
+        return None
+    # Build a PolicyLLMClient the same way the policy engine does.
+    from omnigent.runtime.policies.builder import (
+        _build_policy_llm_client,
+        _resolve_server_llm_connection,
+    )
+
+    conn = _resolve_server_llm_connection(server_llm)
+    return _build_policy_llm_client(server_llm, conn)
+
+
+# Module-level cache for the resolved client.
+_llm_client_cache: dict[str, Any] = {}  # type: ignore[explicit-any]
+
+
+def _resolve_llm_client() -> Any | None:  # type: ignore[explicit-any]
+    """Cached version of :func:`_get_llm_client`."""
+    if "client" not in _llm_client_cache:
+        _llm_client_cache["client"] = _get_llm_client()
+    return _llm_client_cache["client"]
+
+
+def reset_llm_client_cache() -> None:
+    """Reset the cached LLM client (for testing)."""
+    _llm_client_cache.clear()
+
+
 # ── Judge LLM call ──────────────────────────────────────────────────────────
-
-# Reusable client for judge calls (connection pooling across turns).
-_judge_client: httpx.AsyncClient | None = None
-
-
-def _get_judge_client() -> httpx.AsyncClient:
-    global _judge_client
-    if _judge_client is None:
-        _judge_client = httpx.AsyncClient(timeout=15.0)
-    return _judge_client
 
 
 async def _call_judge(
     message: str,
     tiers: dict[str, list[str]],
 ) -> dict[str, Any] | None:
-    """Call the cheapest-tier model as a routing judge.
+    """Call the server-level LLM as a routing judge.
 
-    Returns the parsed verdict dict or ``None`` on any failure (the turn
-    proceeds without routing — fail-open).
+    Uses the :class:`~omnigent.policies.types.PolicyLLMClient` from
+    the server's ``llm:`` config.  Returns the parsed verdict dict or
+    ``None`` on any failure (the turn proceeds without routing —
+    fail-open).
     """
-    host = os.environ.get("DATABRICKS_HOST", "").rstrip("/")
-    token = os.environ.get("DATABRICKS_TOKEN", "")
-    if not host or not token:
-        _logger.debug("smart_routing: DATABRICKS_HOST/TOKEN not set; skipping")
+    llm = _resolve_llm_client()
+    if llm is None:
         return None
-
-    cheap_models = tiers.get("cheap", [])
-    if not cheap_models:
-        return None
-    judge_model = cheap_models[0]
 
     rubric = _build_rubric(tiers)
-    url = f"{host}/serving-endpoints/{judge_model}/invocations"
-
     try:
-        resp = await _get_judge_client().post(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            json={
-                "messages": [
-                    {"role": "system", "content": rubric},
-                    {"role": "user", "content": message[:4000]},
-                ],
-                "max_tokens": 256,
-            },
+        response = await llm.create(
+            instructions=rubric,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": message[:4000],
+                        }
+                    ],
+                }
+            ],
+            max_output_tokens=256,
         )
-        if resp.status_code != 200:
-            _logger.warning(
-                "smart_routing: judge returned %d for model %s",
-                resp.status_code,
-                judge_model,
-            )
-            return None
-        data = resp.json()
-        text = data["choices"][0]["message"]["content"]
+        # Extract text from the Responses API result.
+        text = response.output_text
         return json.loads(text)  # type: ignore[no-any-return]
-    except (httpx.HTTPError, KeyError, json.JSONDecodeError, IndexError):
+    except (json.JSONDecodeError, KeyError, AttributeError, TypeError):
         _logger.warning("smart_routing: judge call failed", exc_info=True)
         return None
 
@@ -185,12 +221,15 @@ async def route_turn(
         _logger.warning("smart_routing: judge returned no model; skipping")
         return None, None
     if tier not in _VALID_TIERS:
-        _logger.warning("smart_routing: judge returned unknown tier %r; skipping", tier)
+        _logger.warning(
+            "smart_routing: judge returned unknown tier %r; skipping",
+            tier,
+        )
         return None, None
 
     # Clamp: if the model isn't in the declared tier, fall back to the
     # first model of that tier (hallucination guard).
-    tier_models = tiers.get(tier, [])
+    tier_models = tiers.get(str(tier), [])
     if model not in tier_models and tier_models:
         _logger.info(
             "smart_routing: judge hallucinated model %r for tier %s; clamping to %s",

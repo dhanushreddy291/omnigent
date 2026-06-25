@@ -7,10 +7,10 @@ public ``route_turn`` entry point.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
 
 from omnigent.server.smart_routing import (
@@ -18,13 +18,31 @@ from omnigent.server.smart_routing import (
     _build_rubric,
     _call_judge,
     infer_tiers,
+    reset_llm_client_cache,
     route_turn,
 )
 
-_DB_ENV = {
-    "DATABRICKS_HOST": "https://test.cloud.databricks.com",
-    "DATABRICKS_TOKEN": "tok",
-}
+
+@dataclass
+class _FakeResponse:
+    """Minimal stub for a Responses API result."""
+
+    output_text: str
+
+
+def _stub_llm(verdict: dict[str, Any]) -> AsyncMock:
+    """Build a mock PolicyLLMClient that returns *verdict* as JSON."""
+    client = AsyncMock()
+    client.create.return_value = _FakeResponse(
+        output_text=json.dumps(verdict),
+    )
+    return client
+
+
+@pytest.fixture(autouse=True)
+def _reset_cache() -> None:
+    """Reset the module-level LLM client cache between tests."""
+    reset_llm_client_cache()
 
 
 # ── infer_tiers ─────────────────────────────────────────────────────
@@ -72,16 +90,6 @@ def test_build_rubric_includes_all_tiers() -> None:
 # ── _call_judge ─────────────────────────────────────────────────────
 
 
-def _mock_judge_response(
-    verdict: dict[str, Any],
-) -> httpx.Response:
-    """Build a fake httpx.Response with an OpenAI-compatible body."""
-    body = {
-        "choices": [{"message": {"content": json.dumps(verdict)}}],
-    }
-    return httpx.Response(200, json=body)
-
-
 @pytest.mark.asyncio
 async def test_call_judge_returns_parsed_verdict() -> None:
     verdict = {
@@ -91,14 +99,9 @@ async def test_call_judge_returns_parsed_verdict() -> None:
     }
     tiers = infer_tiers("claude-sdk")
     assert tiers is not None
-    mock_client = AsyncMock()
-    mock_client.post.return_value = _mock_judge_response(verdict)
-    with (
-        patch.dict("os.environ", _DB_ENV),
-        patch(
-            "omnigent.server.smart_routing._get_judge_client",
-            return_value=mock_client,
-        ),
+    with patch(
+        "omnigent.server.smart_routing._resolve_llm_client",
+        return_value=_stub_llm(verdict),
     ):
         result = await _call_judge("refactor the auth module", tiers)
     assert result is not None
@@ -107,30 +110,26 @@ async def test_call_judge_returns_parsed_verdict() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_judge_returns_none_without_credentials() -> None:
+async def test_call_judge_returns_none_without_llm() -> None:
     tiers = infer_tiers("claude-sdk")
     assert tiers is not None
-    with patch.dict(
-        "os.environ",
-        {"DATABRICKS_HOST": "", "DATABRICKS_TOKEN": ""},
-        clear=False,
+    with patch(
+        "omnigent.server.smart_routing._resolve_llm_client",
+        return_value=None,
     ):
         result = await _call_judge("hello", tiers)
     assert result is None
 
 
 @pytest.mark.asyncio
-async def test_call_judge_returns_none_on_http_error() -> None:
+async def test_call_judge_returns_none_on_error() -> None:
     tiers = infer_tiers("claude-sdk")
     assert tiers is not None
-    mock_client = AsyncMock()
-    mock_client.post.return_value = httpx.Response(500)
-    with (
-        patch.dict("os.environ", _DB_ENV),
-        patch(
-            "omnigent.server.smart_routing._get_judge_client",
-            return_value=mock_client,
-        ),
+    client = AsyncMock()
+    client.create.side_effect = TypeError("boom")
+    with patch(
+        "omnigent.server.smart_routing._resolve_llm_client",
+        return_value=client,
     ):
         result = await _call_judge("hello", tiers)
     assert result is None
@@ -146,14 +145,9 @@ async def test_route_turn_returns_model_and_verdict() -> None:
         "model": "databricks-claude-haiku-4-5",
         "rationale": "trivial",
     }
-    mock_client = AsyncMock()
-    mock_client.post.return_value = _mock_judge_response(verdict)
-    with (
-        patch.dict("os.environ", _DB_ENV),
-        patch(
-            "omnigent.server.smart_routing._get_judge_client",
-            return_value=mock_client,
-        ),
+    with patch(
+        "omnigent.server.smart_routing._resolve_llm_client",
+        return_value=_stub_llm(verdict),
     ):
         model, v = await route_turn("claude-sdk", "hello")
     assert model == "databricks-claude-haiku-4-5"
@@ -163,20 +157,15 @@ async def test_route_turn_returns_model_and_verdict() -> None:
 
 @pytest.mark.asyncio
 async def test_route_turn_clamps_hallucinated_model() -> None:
-    """Judge returns a model not in the tier → clamp to first."""
+    """Judge returns a model not in the tier -> clamp to first."""
     verdict = {
         "tier": "expensive",
         "model": "hallucinated-model",
         "rationale": "hard",
     }
-    mock_client = AsyncMock()
-    mock_client.post.return_value = _mock_judge_response(verdict)
-    with (
-        patch.dict("os.environ", _DB_ENV),
-        patch(
-            "omnigent.server.smart_routing._get_judge_client",
-            return_value=mock_client,
-        ),
+    with patch(
+        "omnigent.server.smart_routing._resolve_llm_client",
+        return_value=_stub_llm(verdict),
     ):
         model, _v = await route_turn("claude-sdk", "hard task")
     assert model == "databricks-claude-opus-4-8"
@@ -192,14 +181,9 @@ async def test_route_turn_unknown_harness() -> None:
 @pytest.mark.asyncio
 async def test_route_turn_rejects_unknown_tier() -> None:
     verdict = {"tier": "gigantic", "model": "m", "rationale": "x"}
-    mock_client = AsyncMock()
-    mock_client.post.return_value = _mock_judge_response(verdict)
-    with (
-        patch.dict("os.environ", _DB_ENV),
-        patch(
-            "omnigent.server.smart_routing._get_judge_client",
-            return_value=mock_client,
-        ),
+    with patch(
+        "omnigent.server.smart_routing._resolve_llm_client",
+        return_value=_stub_llm(verdict),
     ):
         model, _v = await route_turn("claude-sdk", "hello")
     assert model is None
@@ -208,14 +192,9 @@ async def test_route_turn_rejects_unknown_tier() -> None:
 @pytest.mark.asyncio
 async def test_route_turn_rejects_empty_model() -> None:
     verdict = {"tier": "cheap", "model": "", "rationale": "x"}
-    mock_client = AsyncMock()
-    mock_client.post.return_value = _mock_judge_response(verdict)
-    with (
-        patch.dict("os.environ", _DB_ENV),
-        patch(
-            "omnigent.server.smart_routing._get_judge_client",
-            return_value=mock_client,
-        ),
+    with patch(
+        "omnigent.server.smart_routing._resolve_llm_client",
+        return_value=_stub_llm(verdict),
     ):
         model, _v = await route_turn("claude-sdk", "hello")
     assert model is None
