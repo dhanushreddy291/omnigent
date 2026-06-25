@@ -1142,3 +1142,74 @@ async def test_fork_with_cross_family_model_override_rejected(
 
     assert resp.status_code == 400, f"Expected 400, got {resp.status_code}: {resp.text}"
     assert conv_store.fork_calls == [], "No fork should be created on a family mismatch."
+
+
+@pytest.mark.asyncio
+async def test_fork_model_override_rejected_when_harness_unresolvable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An override fork fails CLOSED when the fork harness can't be resolved.
+
+    If ``_agent_harness_id`` can't load the fork's bundle it returns ``None``;
+    the family guard then has nothing to check against. Rather than launch an
+    unvalidated (possibly cross-family) model, the route must reject — a bad
+    bundle must not become a hole in the family check.
+    """
+    conv = _make_conversation()
+    conv_store = _ConversationStore(
+        conversations={"conv_src": conv},
+        items_by_conv={"conv_src": [_make_item("msg_1", "Hi")]},
+    )
+    # Harness loads fine for the OTHER route paths; only the override family
+    # check sees None (simulating an unloadable / unresolvable fork bundle).
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.get_agent_cache",
+        lambda: _StubAgentCache({"ag_test": "codex-native"}),
+    )
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._agent_harness_id",
+        lambda _agent: None,
+    )
+    client = TestClient(_build_app(conv_store))
+
+    resp = client.post(
+        "/v1/sessions/conv_src/fork",
+        json={"model_override": "databricks-gpt-5-4-mini"},
+    )
+
+    assert resp.status_code == 400, f"Expected 400, got {resp.status_code}: {resp.text}"
+    assert conv_store.fork_calls == [], (
+        "No fork should be created when the override can't be family-checked."
+    )
+
+
+@pytest.mark.asyncio
+async def test_fork_unresolvable_harness_ok_without_model_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normal fork (no override) is unaffected by an unresolvable harness.
+
+    The fail-closed guard only fires when an explicit ``model_override`` is
+    supplied; a plain fork must still succeed even if the harness id can't be
+    resolved (it isn't needed without an override to validate).
+    """
+    conv = _make_conversation()
+    conv_store = _ConversationStore(
+        conversations={"conv_src": conv},
+        items_by_conv={"conv_src": [_make_item("msg_1", "Hi")]},
+    )
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions.get_agent_cache",
+        lambda: _StubAgentCache({"ag_test": "codex-native"}),
+    )
+    monkeypatch.setattr(
+        "omnigent.server.routes.sessions._agent_harness_id",
+        lambda _agent: None,
+    )
+    client = TestClient(_build_app(conv_store))
+
+    resp = client.post("/v1/sessions/conv_src/fork", json={})
+
+    assert resp.status_code == 201, f"Expected 201, got {resp.status_code}: {resp.text}"
+    assert len(conv_store.fork_calls) == 1
+    assert conv_store.fork_calls[0]["model_override"] is None

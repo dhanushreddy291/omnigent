@@ -862,6 +862,29 @@ class TestModelFlagHelpers:
         monkeypatch.setattr("omnigent.codex_native_app_server._create_subprocess_exec", _fake_exec)
         assert await _codex_supports_model_flag("/usr/bin/codex") is False
 
+    async def test_supports_model_flag_ignores_lookalike_options_and_prose(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only a real ``--model`` option definition counts, not lookalikes.
+
+        A build without ``--model`` may still mention a ``--model-provider``
+        flag or the word in prose; the matcher must not false-positive on
+        either and pass an unsupported flag to the launch.
+        """
+        from omnigent.codex_native_app_server import _codex_supports_model_flag
+
+        async def _fake_exec(*_args: Any, **_kwargs: Any) -> Any:
+            return _HelpProc(
+                b"Options:\n"
+                b"      --model-provider <ID>\n"
+                b"          Override the default model provider\n"
+                b"  -c, --config <key=value>\n"
+                b"          e.g. set the --model in config.toml\n"
+            )
+
+        monkeypatch.setattr("omnigent.codex_native_app_server._create_subprocess_exec", _fake_exec)
+        assert await _codex_supports_model_flag("/usr/bin/codex") is False
+
 
 @dataclass
 class _HelpProc:

@@ -14232,11 +14232,19 @@ def create_sessions_router(
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
             base_harness = await asyncio.to_thread(_agent_harness_id, base_agent)
-            mismatch = (
-                model_family_mismatch(base_harness, fork_model_override)
-                if base_harness is not None
-                else None
-            )
+            # Fail CLOSED: if the fork harness can't be resolved we can't
+            # family-check the override, so reject rather than launch an
+            # unvalidated cross-family model. (Only when an override was
+            # actually supplied — a normal fork with no override is
+            # unaffected by an unloadable bundle here.)
+            if base_harness is None:
+                raise OmnigentError(
+                    "cannot validate model_override: the fork's harness could not "
+                    "be resolved. Retry without a model override to keep the "
+                    "source's model.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            mismatch = model_family_mismatch(base_harness, fork_model_override)
             if mismatch is not None:
                 raise OmnigentError(mismatch, code=ErrorCode.INVALID_INPUT)
 

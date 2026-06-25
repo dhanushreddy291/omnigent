@@ -152,7 +152,16 @@ async def _codex_supports_model_flag(codex_path: str) -> bool:
         with contextlib.suppress(Exception):
             await proc.wait()
         return False
-    return "--model" in stdout.decode("utf-8", errors="replace")
+    # Match ``--model`` only as an option *definition* line, not anywhere the
+    # word appears in help prose. Clap renders options as an indented line
+    # whose first token is the option, e.g. ``  -m, --model <MODEL>`` (or a
+    # long-only ``      --model <MODEL>``). Anchor to the start of such a line
+    # — optional indent, an optional short alias (``-m, ``), then ``--model``
+    # at an option boundary. This rejects lookalikes (``--model-provider``)
+    # and descriptions that merely mention ``--model`` mid-sentence, either of
+    # which would otherwise pass an unsupported flag to the launch.
+    help_text = stdout.decode("utf-8", errors="replace")
+    return re.search(r"^\s*(?:-\S+,\s+)?--model(?=[\s=<]|$)", help_text, re.MULTILINE) is not None
 
 
 def _format_codex_version(version: tuple[int, int, int] | None) -> str:
