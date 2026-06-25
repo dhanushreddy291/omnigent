@@ -1016,12 +1016,16 @@ async def _auto_create_opencode_terminal(
     # provider config the ambient env/global config already gives it.
     from omnigent.opencode_native_bridge import xdg_config_home_for_bridge_dir
     from omnigent.opencode_native_provider import (
+        build_opencode_mcp_block,
         build_opencode_model_default_config,
         build_opencode_provider_config,
         resolve_databricks_gateway,
         write_opencode_provider_config,
     )
 
+    # Accumulate the synthesized opencode.json: provider/model (Databricks
+    # gateway or a pinned default) + the agent's MCP servers + force-ask.
+    config: dict[str, object] = {}
     gateway = resolve_databricks_gateway(
         _opencode_native_profile_from_spec(agent_spec), model_id=model_override
     )
@@ -1029,19 +1033,29 @@ async def _auto_create_opencode_terminal(
         # Pin the per-prompt model to the synthesized provider/endpoint id, and
         # write it as opencode's default model too so the TUI launches on it.
         model_override = gateway.qualified_model
-        config = build_opencode_provider_config(gateway)
+        config = dict(build_opencode_provider_config(gateway))
         config["model"] = model_override
-        write_opencode_provider_config(xdg_config_home_for_bridge_dir(bridge_dir), config)
     elif model_override:
         # No custom provider, but a model is pinned (``omni opencode --model`` or
         # the ``omni setup`` OpenCode default): write opencode's default model so
         # the native TUI and the first turn use it instead of ``opencode/big-pickle``.
         # OpenCode resolves the provider from the model-id prefix against its own
         # auth.json, so no provider block is needed.
-        write_opencode_provider_config(
-            xdg_config_home_for_bridge_dir(bridge_dir),
-            build_opencode_model_default_config(model_override),
-        )
+        config = dict(build_opencode_model_default_config(model_override))
+
+    # Make the agent's MCP servers available to opencode (translated into its
+    # own config), and force every tool call to prompt so it routes through
+    # Omnigent's policy engine via the forwarder's permission gate — opencode's
+    # enforcement is reactive (no pre-tool hook), so "ask" is what makes the
+    # policy verdicts apply to MCP (and other) tools.
+    mcp_block = build_opencode_mcp_block(_opencode_native_mcp_servers_from_spec(agent_spec))
+    if mcp_block:
+        config.setdefault("$schema", "https://opencode.ai/config.json")
+        config["mcp"] = mcp_block
+        config["permission"] = "ask"
+
+    if config:
+        write_opencode_provider_config(xdg_config_home_for_bridge_dir(bridge_dir), config)
 
     # The server runs with a per-session XDG_DATA_HOME, so copy the user's
     # `opencode auth login` credentials in — otherwise it can't authenticate
@@ -1325,6 +1339,22 @@ def _opencode_native_profile_from_spec(agent_spec: Any | None) -> str | None:
         return str(profile) if profile else None
     except Exception:  # noqa: BLE001 - profile resolution is best effort.
         return None
+
+
+def _opencode_native_mcp_servers_from_spec(agent_spec: Any | None) -> list[Any]:
+    """
+    Return the resolved agent spec's MCP server declarations (or empty).
+
+    :param agent_spec: Optional resolved agent spec.
+    :returns: The spec's ``mcp_servers`` list, or ``[]``.
+    """
+    if agent_spec is None:
+        return []
+    try:
+        spec = getattr(agent_spec, "spec", agent_spec)
+        return list(getattr(spec, "mcp_servers", []) or [])
+    except Exception:  # noqa: BLE001 - best effort.
+        return []
 
 
 def _pi_args_have_session_control(args: list[str]) -> bool:
