@@ -960,6 +960,10 @@ export function NewChatLandingScreen() {
   // picker can tag the current machine and offer to auto-connect it.
   const [desktopHost, setDesktopHost] = useState<HostStatus | null>(null);
   const [connectingThisMachine, setConnectingThisMachine] = useState(false);
+  // Defer the connect until the dropdown has actually closed (set on select,
+  // consumed in the menu's onOpenChange) — connecting while the menu is open
+  // looks janky. A ref so the close handler sees it synchronously.
+  const pendingConnectRef = useRef(false);
   // Sandbox repository inputs — composed into the managed create's
   // `workspace` string (`<url>[#<branch>]`); both blank = empty
   // server-created workspace.
@@ -1840,7 +1844,16 @@ export function NewChatLandingScreen() {
           <div className="relative z-0 -mt-9 flex w-full items-center rounded-b-2xl bg-tray/40 pt-8 pr-3 pb-2 pl-2">
             <div className="flex flex-wrap items-center gap-1.5">
               {/* Host chip */}
-              <DropdownMenu>
+              <DropdownMenu
+                onOpenChange={(open) => {
+                  // Run a requested "connect this machine" only once the menu
+                  // has closed.
+                  if (!open && pendingConnectRef.current) {
+                    pendingConnectRef.current = false;
+                    void connectThisMachine();
+                  }
+                }}
+              >
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
@@ -1932,16 +1945,14 @@ export function NewChatLandingScreen() {
                   ))}
                   {offlineHosts.map((host) => {
                     // This machine, offline: make the row itself the connect
-                    // affordance (clickable, keeps the menu open while
-                    // connecting) instead of a disabled entry + a duplicate
-                    // "Run on this machine" item.
+                    // affordance instead of a disabled entry + a duplicate "Run
+                    // on this machine" item. Connect after the menu closes.
                     if (host.host_id === thisMachineHostId && canConnectThisMachine) {
                       return (
                         <DropdownMenuItem
                           key={host.host_id}
-                          onSelect={(e) => {
-                            e.preventDefault();
-                            void connectThisMachine();
+                          onSelect={() => {
+                            pendingConnectRef.current = true;
                           }}
                           disabled={connectingThisMachine}
                           data-testid="new-chat-landing-run-on-this-machine"
@@ -1969,9 +1980,8 @@ export function NewChatLandingScreen() {
                     it in one click. */}
                   {showConnectThisMachine && (
                     <DropdownMenuItem
-                      onSelect={(e) => {
-                        e.preventDefault();
-                        void connectThisMachine();
+                      onSelect={() => {
+                        pendingConnectRef.current = true;
                       }}
                       disabled={connectingThisMachine}
                       data-testid="new-chat-landing-run-on-this-machine"
