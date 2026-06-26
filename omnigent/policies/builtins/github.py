@@ -822,7 +822,34 @@ def _classify_shell_command(command: str, _depth: int = 0) -> list[_ShellOp]:
             op = None
         if op is not None:
             ops.append(op)
+        elif tokens[0] not in ("git", "gh") and _has_hidden_git_token(tokens, segment):
+            # A gated git/gh token hides behind an unrecognized head — fail closed.
+            ops.append(
+                _ShellOp(
+                    kind="unparseable",
+                    repo=None,
+                    branches=frozenset(),
+                    branch_targeted=False,
+                    detail=segment[:60],
+                )
+            )
     return ops
+
+
+def _has_hidden_git_token(tokens: list[str], segment: str) -> bool:
+    """
+    Whether a segment hides a gated git/gh token behind an unrecognized head.
+
+    :param tokens: Real-invocation tokens (head is not ``git``/``gh``).
+    :param segment: The raw command segment.
+    :returns: ``True`` when a standalone ``git``/``gh`` token appears, or a
+        command substitution wraps a ``git``/``gh`` word.
+    """
+    if "git" in tokens or "gh" in tokens:
+        return True
+    if ("$(" in segment or "`" in segment) and re.search(r"\b(git|gh)\b", segment):
+        return True
+    return False
 
 
 # ── The policy factory ─────────────────────────────────────────────────────────

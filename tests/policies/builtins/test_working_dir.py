@@ -321,6 +321,40 @@ def test_untokenizable_gated_segment_surfaces_action() -> None:
     assert result is not None and result["result"] == "DENY"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Standalone cd hidden behind an unrecognized wrapper head.
+        "timeout 5 cd /outside",
+        # git worktree switch hidden behind an unrecognized wrapper head.
+        "setsid git worktree add /tmp/wt",
+    ],
+)
+def test_hidden_dir_op_behind_wrapper_fails_closed(command: str) -> None:
+    """A gated cd/worktree behind an unparsed wrapper head fails closed (DENY).
+
+    The head (``timeout`` / ``setsid``) is not recognized, so ``_classify_segment``
+    returns None — previously None == ALLOW, the fail-open of GHSA-7mqg-cx4g-x2rf.
+    The heuristic must now surface it via the configured action.
+    """
+    policy = block_working_dir_changes()
+    result = policy(_sh(command))
+    assert result is not None and result["result"] == "DENY"
+
+
+def test_wrapped_git_dash_c_unwrapped_and_gated() -> None:
+    """``bash -lc "git -C /etc status"`` unwraps (combined short flag) and is gated."""
+    policy = block_working_dir_changes()
+    result = policy(_sh('bash -lc "git -C /etc status"'))
+    assert result is not None and result["result"] == "DENY"
+
+
+def test_cd_into_allowed_dir_not_affected_by_fail_closed() -> None:
+    """A legit ``cd`` into an allowed dir still abstains (the branch only fires on None)."""
+    policy = block_working_dir_changes(allowed_dirs=["/workspace"])
+    assert policy(_sh("cd /workspace/sub")) is None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Layer 1 — abstention (composition) and tool selection
 # ══════════════════════════════════════════════════════════════════════════════

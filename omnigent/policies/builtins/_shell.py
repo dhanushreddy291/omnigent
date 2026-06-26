@@ -93,7 +93,8 @@ def unwrap_shell_command(tokens: list[str]) -> str | None:
     head = tokens[0].rsplit("/", 1)[-1]
     if head in SHELL_INTERPRETERS:
         for i, tok in enumerate(tokens):
-            if tok == "-c" and i + 1 < len(tokens):
+            # Match ``-c`` and combined short-flag groups ending in ``c`` (``-lc``, ``-ic``).
+            if re.fullmatch(r"-[A-Za-z]*c", tok) and i + 1 < len(tokens):
                 return tokens[i + 1]
         return None
     if head == "eval":

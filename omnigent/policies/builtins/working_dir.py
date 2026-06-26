@@ -373,6 +373,17 @@ def block_working_dir_changes(
             op = _classify_segment(tokens, block_cd, block_worktree)
             if op is not None:
                 worst = _worse(worst, _gate(op))
+            elif tokens[0].lstrip("(") not in ("git", *_CD_COMMANDS) and _looks_like_dir_op(
+                segment, block_cd, block_worktree
+            ):
+                # Head not recognized but a gated dir/worktree token hides inside — fail closed.
+                worst = _worse(
+                    worst,
+                    _violation(
+                        f"Blocked: could not parse a shell command ({segment[:60]!r}) that "
+                        f"appears to switch directories or worktrees."
+                    ),
+                )
         return worst
 
     def _evaluate(event: PolicyEvent) -> PolicyResponse | None:

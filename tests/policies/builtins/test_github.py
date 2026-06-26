@@ -447,6 +447,69 @@ def test_shell_unparseable_git_command_asks() -> None:
     assert result is not None and result["result"] == "ASK"
 
 
+def test_shell_combined_short_flag_lc_is_unwrapped() -> None:
+    """``bash -lc "git push <secret>"`` unwraps and the inner push is denied.
+
+    Without matching combined short-flag groups ending in ``c`` (GHSA-7mqg-cx4g-x2rf),
+    the wrapper is not unwrapped and the gated push slips past as no-op = ALLOW.
+    """
+    policy = github_policy(write_repos=[_REPO], write_branches=["main"])
+    result = policy(_sh('bash -lc "git push https://github.com/octo/secret main"'))
+    assert result is not None and result["result"] == "DENY"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Standalone git token hidden behind an unrecognized wrapper head.
+        "timeout 5 git push https://github.com/octo/secret main",
+        "setsid git push https://github.com/octo/secret main",
+        # Command substitution hides the gated git invocation.
+        "x=$(git push https://github.com/octo/secret main)",
+        "result=`git push https://github.com/octo/secret main`",
+    ],
+)
+def test_shell_hidden_git_token_fails_closed_to_ask(command: str) -> None:
+    """A gated git token hidden behind an unparsed wrapper/substitution ASKs.
+
+    Previously these produced no op (the head was not git/gh), so the policy
+    returned None == ALLOW — the fail-open of GHSA-7mqg-cx4g-x2rf. They must now
+    fail closed to ASK.
+    """
+    policy = github_policy(write_repos=[_REPO], write_branches=["main"])
+    result = policy(_sh(command))
+    assert result is not None and result["result"] == "ASK"
+
+
+def test_shell_bare_push_to_non_allowlisted_url_still_denied() -> None:
+    """The classic control still holds: a bare push to a non-allowlisted URL DENIES."""
+    policy = github_policy(write_repos=[_REPO], write_branches=["main"])
+    result = policy(_sh("git push https://github.com/octo/secret main"))
+    assert result is not None and result["result"] == "DENY"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git add .",
+        "git status",
+        "git commit -m x",
+        # A quoted single arg mentioning git is not a standalone git token.
+        'echo "use git to push"',
+        # ``.gitignore`` has no \\bgit\\b word boundary as a standalone token.
+        "cat .gitignore",
+    ],
+)
+def test_shell_benign_commands_not_gated(command: str) -> None:
+    """Local git ops and benign git-mentioning commands are NOT asked/denied.
+
+    The fail-closed branch must only fire on a *standalone* git/gh token or a
+    command substitution — not on local git or incidental ``git`` substrings.
+    """
+    policy = github_policy(write_repos=[_REPO], write_branches=["main"])
+    assert policy(_sh(command)) is None
+
+
 def test_shell_tools_param_overrides_default_tool() -> None:
     """A custom shell tool name is parsed when listed in ``shell_tools``.
 
