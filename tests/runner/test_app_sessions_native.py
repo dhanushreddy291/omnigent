@@ -11687,6 +11687,7 @@ async def test_events_compact_on_qwen_native_503_dismisses_spinner_on_submit_fai
         "response.compaction.failed",
     ], f"Expected in_progress then failed (no completed); got {compaction_types!r}."
 
+
 @pytest.mark.asyncio
 async def test_events_compact_on_non_native_session_is_204_noop(
     monkeypatch: pytest.MonkeyPatch,
