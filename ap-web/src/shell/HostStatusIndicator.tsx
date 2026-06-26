@@ -122,7 +122,7 @@ function StatusMenu({
       >
         <span className="truncate">{title}</span>
         <span className="ml-auto flex items-center gap-1.5">
-          {display.hint && <span className="text-xs">{display.hint}</span>}
+          {display.hint && <span className="text-xs leading-none">{display.hint}</span>}
           <span aria-hidden className={cn("size-2 shrink-0 rounded-full", display.tone)} />
         </span>
       </DropdownMenuTrigger>
