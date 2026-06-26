@@ -352,6 +352,56 @@ function runCli(cliPath, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
 }
 
 /**
+ * Whether the CLI holds valid stored credentials for a server — read straight
+ * from `~/.omnigent/auth_tokens.json` (no subprocess), mirroring
+ * omnigent/cli_auth.py: keyed by the trailing-slash-stripped URL, a record is
+ * valid if it's a Databricks pointer (has `workspace_host`) or a non-expired
+ * session token. The CLI's `state_dir()` is hardcoded to `~/.omnigent`.
+ *
+ * @param {string} serverUrl
+ * @returns {boolean}
+ */
+function serverAuthed(serverUrl) {
+  if (typeof serverUrl !== "string" || serverUrl === "") return false;
+  const key = serverUrl.replace(/\/+$/, "");
+  let data;
+  try {
+    data = JSON.parse(
+      fs.readFileSync(path.join(os.homedir(), ".omnigent", "auth_tokens.json"), "utf8"),
+    );
+  } catch {
+    return false;
+  }
+  const entry = data && typeof data === "object" ? data[key] : null;
+  if (!entry || typeof entry !== "object") return false;
+  if (entry.auth_type === "databricks") {
+    return typeof entry.workspace_host === "string" && entry.workspace_host !== "";
+  }
+  if (typeof entry.token === "string" && entry.token !== "") {
+    // expires_at is unix seconds (cli_auth uses time.time()); treat absent as
+    // non-expiring.
+    return typeof entry.expires_at === "number" ? entry.expires_at >= Date.now() / 1000 : true;
+  }
+  return false;
+}
+
+/**
+ * Run `omnigent login <serverUrl>` to authenticate the CLI to a server. It's a
+ * no-op when the server needs no auth (header mode), opens the system browser
+ * for OIDC / Databricks, and fails fast for password (TTY) modes when run
+ * without a terminal. Long timeout to allow the interactive browser flow.
+ *
+ * @param {string} cliPath
+ * @param {string} serverUrl
+ * @param {{ timeoutMs?: number }} [opts]
+ * @returns {Promise<{ ok: boolean, output: string }>}
+ */
+async function loginServer(cliPath, serverUrl, { timeoutMs = 180000 } = {}) {
+  const res = await runCli(cliPath, ["login", serverUrl], { timeoutMs });
+  return { ok: res.code === 0, output: (res.stdout || res.stderr).trim() };
+}
+
+/**
  * Parse the first JSON object out of CLI stdout. The status commands emit a
  * single JSON blob, but tolerate a stray leading warning line by falling back
  * to the outermost `{…}` slice. Returns null when nothing parses.
@@ -570,6 +620,8 @@ module.exports = {
   stopLocalServer,
   getHostStatus,
   stopHost,
+  serverAuthed,
+  loginServer,
   matchesServer,
   connectionFromStatus,
 };

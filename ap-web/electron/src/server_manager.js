@@ -241,6 +241,28 @@ async function disconnectHost(cliPath, serverUrl) {
 }
 
 /**
+ * Ensure the CLI is authenticated for a server before connecting a host to it.
+ * Local (loopback) servers need no auth. For a remote server with no valid
+ * stored credentials, runs `omnigent login <url>` (browser/OIDC/Databricks; a
+ * no-op when the server needs no auth). Returns ok when already authed, after a
+ * successful login, or for a no-auth server; an error (pointing at `omnigent
+ * login`) when login fails — e.g. a password/TTY mode that can't run headless.
+ *
+ * @param {string} cliPath
+ * @param {string} serverUrl
+ * @returns {Promise<{ ok: boolean, error?: string }>}
+ */
+async function ensureServerAuth(cliPath, serverUrl) {
+  if (cli.isLoopbackServer(serverUrl) || cli.serverAuthed(serverUrl)) return { ok: true };
+  const res = await cli.loginServer(cliPath, serverUrl);
+  if (res.ok) return { ok: true };
+  return {
+    ok: false,
+    error: `Sign-in required — run \`omnigent login ${serverUrl}\` in a terminal, then try again.`,
+  };
+}
+
+/**
  * Restart this machine's host connection: stop (awaiting the daemon down), then
  * reconnect.
  *
@@ -493,6 +515,7 @@ async function shutdown(cliPath) {
 
 module.exports = {
   ensureHostConnected,
+  ensureServerAuth,
   disconnectHost,
   restartHost,
   startLocalServer,

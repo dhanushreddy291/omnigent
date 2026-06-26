@@ -1938,10 +1938,19 @@ function registerIpc() {
       return { ok: false, error: "The omnigent CLI was not found. Install it or set its path." };
     }
     let result;
-    if (action === "start") result = await serverManager.ensureHostConnected(cliPath, serverUrl);
-    else if (action === "stop") result = await serverManager.disconnectHost(cliPath, serverUrl);
-    else if (action === "restart") result = await serverManager.restartHost(cliPath, serverUrl);
-    else result = { ok: false, error: `unknown host action '${action}'` };
+    if (action === "start" || action === "restart") {
+      // Ensure the CLI is authenticated for a remote server first (local needs
+      // none) — otherwise the host connect would just fail on a 401.
+      const auth = await serverManager.ensureServerAuth(cliPath, serverUrl);
+      if (!auth.ok) result = { ok: false, error: auth.error };
+      else if (action === "start")
+        result = await serverManager.ensureHostConnected(cliPath, serverUrl);
+      else result = await serverManager.restartHost(cliPath, serverUrl);
+    } else if (action === "stop") {
+      result = await serverManager.disconnectHost(cliPath, serverUrl);
+    } else {
+      result = { ok: false, error: `unknown host action '${action}'` };
+    }
     // Remember the intent so a running host is restored on next launch: a
     // successful start/restart enables it; an explicit stop clears it.
     if (action === "stop") setHostServerEnabled(serverUrl, false);
