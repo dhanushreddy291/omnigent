@@ -121,24 +121,37 @@ def clone_hermes_session(
     :param target_session_id: New session id for the cloned rows.
     :param workspace: If provided, overrides ``cwd`` on the cloned session row.
     """
+    # Validate the source DB before copying: it must have a sessions table
+    # and contain the requested session. If not, skip the clone silently so
+    # Hermes starts fresh rather than crashing on a broken state.db.
+    try:
+        src_conn = sqlite3.connect(f"file:{source_db}?mode=ro", uri=True)
+        try:
+            row = src_conn.execute(
+                "SELECT id FROM sessions WHERE id = ?",
+                (source_session_id,),
+            ).fetchone()
+        finally:
+            src_conn.close()
+    except sqlite3.Error:
+        _logger.warning(
+            "Source hermes state.db at %s is unreadable; skipping clone",
+            source_db,
+        )
+        return
+    if row is None:
+        _logger.warning(
+            "Source hermes session %s not found in %s; skipping clone",
+            source_session_id,
+            source_db,
+        )
+        return
+
     target_db.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_db, target_db)
 
     conn = sqlite3.connect(str(target_db))
     try:
-        # Verify the source session exists.
-        row = conn.execute(
-            "SELECT id FROM sessions WHERE id = ?",
-            (source_session_id,),
-        ).fetchone()
-        if row is None:
-            _logger.warning(
-                "Source hermes session %s not found in %s; skipping clone",
-                source_session_id,
-                source_db,
-            )
-            return
-
         # Remap session id and update started_at so the forwarder can
         # discover this cloned session (its floor is launch_epoch_s).
         conn.execute(

@@ -2439,21 +2439,31 @@ async def _auto_create_hermes_terminal(
             _target_session_id = mint_hermes_session_id()
             _target_db = _hermes_home_path / "state.db" if _hermes_home_path else None
             if _target_db is not None:
-                await asyncio.to_thread(
-                    clone_hermes_session,
-                    _source_db,
-                    _target_db,
-                    launch_config.fork_source_external_id,
-                    _target_session_id,
-                    workspace=workspace,
-                )
-                hermes_args.extend(["--resume", _target_session_id])
-                _logger.info(
-                    "Cloned hermes session %s -> %s for fork; session=%s",
-                    launch_config.fork_source_external_id,
-                    _target_session_id,
-                    session_id,
-                )
+                try:
+                    await asyncio.to_thread(
+                        clone_hermes_session,
+                        _source_db,
+                        _target_db,
+                        launch_config.fork_source_external_id,
+                        _target_session_id,
+                        workspace=workspace,
+                    )
+                    hermes_args.extend(["--resume", _target_session_id])
+                    _logger.info(
+                        "Cloned hermes session %s -> %s for fork; session=%s",
+                        launch_config.fork_source_external_id,
+                        _target_session_id,
+                        session_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    _logger.warning(
+                        "Failed to clone hermes session for fork; launching fresh; session=%s",
+                        session_id,
+                        exc_info=True,
+                    )
+                    # Remove broken state.db so Hermes starts fresh.
+                    if _target_db.exists():
+                        _target_db.unlink()
     # If a per-session HERMES_HOME was written (policy hook), pass it via env
     # so the TUI picks up the hook config alongside its own approval prompt.
     _hermes_terminal_env: dict[str, str] = {}
