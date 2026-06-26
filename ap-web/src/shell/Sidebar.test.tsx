@@ -669,10 +669,7 @@ describe("Sidebar project sections", () => {
     // (only Alpha), not collapse-everything.
     fireEvent.click(screen.getByTestId("revert-projects"));
     expect(screen.getByRole("button", { name: /^Alpha/ })).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("button", { name: /^Beta/ })).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
+    expect(screen.getByRole("button", { name: /^Beta/ })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("deletes a project (and all its sessions) from the folder kebab after confirming", async () => {
