@@ -17,18 +17,18 @@
 # Tokens: omnigent labels/comments use GITHUB_TOKEN (applying a label with it does
 # NOT recursively trigger this workflow, which is why classify+draft live in ONE
 # workflow). The cross-repo omnigent-site PR uses a token minted from the existing
-# `omnigent-ci` App, scoped to omnigent-site — which requires the App's install to
-# include omnigent-site (one-time; see docs/OMNIGENT_BOT_SETUP.md). When the App
-# isn't configured the draft still runs and prints its diff to the run summary but
-# does not push — this fail-open relies on omnigent-site being PUBLIC so the
-# github.token fallback can read it; if it ever goes private, the checkout (read)
-# needs the App token too.
+# `omnigent-ci` App, scoped to omnigent-site. That App is ALREADY installed on
+# omnigent-site with contents + PR write — the sync-openapi-to-site.yml workflow on
+# main uses it the same way. If the App is ever unavailable the draft still runs
+# and prints its diff to the run summary but does not push — this fail-open relies
+# on omnigent-site being PUBLIC so the github.token read-only checkout works.
 #
 # Safety: pull_request_target runs in the trusted base-repo context. We check out
 # the trusted DEFAULT branch and read the PR diff via the API; PR-authored code is
-# never executed. The drafter runs under a network-denying sandbox (see
-# .github/agents/doc-drafter/config.yaml) so an injected diff can't exfiltrate the
-# LLM key, and drafted file content is scanned for the key before any push.
+# never executed. The drafter is unsandboxed like the examples/polly CI reviewer,
+# but only runs on already-merged PRs, the write-token is minted after it finishes
+# (never in its reach), and both its output and the drafted files are scanned for
+# the LLM key before any push.
 name: Doc sync
 
 on:
@@ -52,7 +52,7 @@ concurrency:
 
 env:
   CODE_REPO: omnigent-ai/omnigent
-  SITE_REPO_SLUG: omnigent-ai/omnigent-site
+  SITE_REPO_SLUG: ${{ github.repository_owner }}/omnigent-site
   OMNIGENT_SKIP_WEB_UI: "true"
   UV_INDEX_URL: https://pypi.org/simple
   PIP_INDEX_URL: https://pypi.org/simple
@@ -490,7 +490,7 @@ jobs:
         with:
           app-id: ${{ vars.OMNIGENT_BOT_APP_ID }}
           private-key: ${{ secrets.OMNIGENT_BOT_APP_KEY }}
-          owner: omnigent-ai
+          owner: ${{ github.repository_owner }}
           repositories: omnigent-site
 
       - name: Build site PR body and resolve reviewer
@@ -601,8 +601,8 @@ jobs:
       - name: Note draft skipped (no site token)
         if: steps.sitechanges.outputs.changed == 'true' && steps.site-token.outputs.token == ''
         run: |
-          echo "::warning::Doc edits were drafted but no omnigent-site token is available"
-          echo "(extend the omnigent-ci App's install to omnigent-site). The PR was not opened."
+          echo "::warning::Doc edits were drafted but the omnigent-site App token could not be minted"
+          echo "(OMNIGENT_BOT_APP_ID/KEY missing, or the omnigent-ci App lost access to omnigent-site). The PR was not opened."
           echo "### Doc-sync: drafted but not pushed" >> "$GITHUB_STEP_SUMMARY"
           { echo '```diff'; (cd omnigent-site && git --no-pager diff); echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
 
