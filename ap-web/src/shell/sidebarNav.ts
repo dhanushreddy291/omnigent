@@ -169,3 +169,52 @@ export function normalizePinnedConversationIds(
 
   return normalized;
 }
+
+// ── Drag-and-drop ────────────────────────────────────────────────────────────
+
+/** The session being dragged: its id and the project it's currently filed
+    under (`null` when it lives in the flat list, outside any project). */
+export interface SidebarDragSource {
+  id: string;
+  project: string | null;
+}
+
+/** What a row was dropped onto. A project folder files the session into that
+    project; the "ungroup" zone removes it from its project. `null` is a drop
+    that landed on nothing droppable (e.g. "Shared with me", which is never a
+    target — sessions can't be filed there). */
+export type SidebarDropTarget = { type: "project"; name: string } | { type: "ungroup" } | null;
+
+/** The action a drop resolves to. `move` files the session into a project;
+    `ungroup` removes it from its current project (the caller still confirms
+    when it's the project's last member); `none` is a no-op (dropped on nothing,
+    on its own folder, or "ungroup" while already unfiled). */
+export type SidebarDropAction =
+  | { kind: "move"; project: string }
+  | { kind: "ungroup"; project: string }
+  | { kind: "none" };
+
+/**
+ * Pure resolution of a sidebar drag-and-drop: given the dragged session and the
+ * target it was released over, decide whether to file it into a project, remove
+ * it from its project, or do nothing. Kept side-effect-free so the routing is
+ * unit-testable independent of dnd-kit and the mutation hooks.
+ *
+ * - Dropped on a project folder it isn't already in → `move`.
+ * - Dropped on its OWN folder → `none` (no pointless PATCH / re-fetch).
+ * - Dropped on the ungroup zone while filed → `ungroup`.
+ * - Dropped on the ungroup zone while already unfiled, or on nothing → `none`.
+ */
+export function resolveSidebarDrop(
+  source: SidebarDragSource,
+  target: SidebarDropTarget,
+): SidebarDropAction {
+  if (!target) return { kind: "none" };
+  if (target.type === "project") {
+    if (target.name === source.project) return { kind: "none" };
+    return { kind: "move", project: target.name };
+  }
+  // Ungroup: only meaningful for a session that's actually filed somewhere.
+  if (!source.project) return { kind: "none" };
+  return { kind: "ungroup", project: source.project };
+}
