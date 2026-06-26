@@ -1961,7 +1961,9 @@ export function NewChatLandingScreen() {
                           <HostOption
                             host={host}
                             subtitle={
-                              connectingThisMachine ? "connecting…" : "this machine · connect"
+                              connectingThisMachine
+                                ? "connecting…"
+                                : "this machine · select to connect"
                             }
                           />
                         </DropdownMenuItem>
