@@ -12800,7 +12800,20 @@ def create_runner_app(
         _subagent_wake_pending.discard(conv)
         try:
             await _run_turn_bg_setup_and_stream(msg_body, conv)
-        except BaseException as exc:
+        except asyncio.CancelledError as exc:
+            # Task cancellation (e.g. event-loop teardown) must still
+            # publish a terminal ``failed`` status so the session never
+            # hangs on a stale "running" turn. Re-raise after cleanup to
+            # preserve asyncio cancellation semantics.
+            _logger.error(
+                "turn cancelled for %s: %s",
+                conv,
+                exc,
+                exc_info=True,
+            )
+            _on_proxy_stream_end(conv, error={"message": f"turn setup failed: {exc}"})
+            raise
+        except Exception as exc:
             # Any failure before the harness stream starts (e.g. a provider
             # with no resolvable model raising OmnigentError from
             # ``_build_spawn_env_from_spec``) must still end the turn: clear
@@ -12808,12 +12821,6 @@ def create_runner_app(
             # ``_on_proxy_stream_end``. Without this, the session stays pinned
             # to "running" forever and the REPL spins on "working" with no
             # output (the silent-hang failure mode).
-            #
-            # We catch ``BaseException`` (not just ``Exception``) so that
-            # ``CancelledError`` and similar also publish the terminal
-            # ``failed`` status before propagating. Non-``Exception``
-            # subclasses are re-raised to preserve asyncio cancellation
-            # semantics.
             _logger.error(
                 "turn setup failed for %s: %s",
                 conv,
@@ -12821,8 +12828,6 @@ def create_runner_app(
                 exc_info=True,
             )
             _on_proxy_stream_end(conv, error={"message": f"turn setup failed: {exc}"})
-            if not isinstance(exc, Exception):
-                raise
 
     async def _run_turn_bg_setup_and_stream(
         msg_body: dict[str, Any],
