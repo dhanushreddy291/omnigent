@@ -72,18 +72,22 @@ def main() -> None:
 
     try:
         from omnigent.native_policy_hook import (
+            policy_hook_reauth,
             policy_hook_request_headers,
             post_evaluate_with_retry,
         )
 
+        headers = policy_hook_request_headers()
         resp = post_evaluate_with_retry(
             url=url,
-            headers=policy_hook_request_headers(),
+            headers=headers,
             eval_request=eval_body,
             # One day — must match the server's ``ask_timeout`` so the hook
             # stays alive while the human responds to the web-UI approval card.
             read_timeout=86400.0,
             hook_label="hermes pre_tool_call",
+            # Re-mint the baked one-shot token if it lapses mid-session.
+            reauth=policy_hook_reauth(server_url, headers),
         )
     except Exception:  # noqa: BLE001 -- fail open on import / unexpected error
         json.dump({}, sys.stdout)

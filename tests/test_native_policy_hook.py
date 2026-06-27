@@ -624,3 +624,38 @@ def test_policy_hook_wrapper_script_omits_auth_when_unauthenticated(
     )
     assert "Bearer" not in line
     assert "X-Databricks-Org-Id" not in line
+
+
+def test_policy_hook_reauth_remints_and_preserves_routing_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared reauth re-mints the bearer and keeps the routing header.
+
+    When a baked one-shot token lapses, the four hooks (codex/kimi/cursor/
+    hermes) that wire this builder must mint a fresh bearer through the same
+    factory the refresh-capable runtime auth uses — without dropping the
+    workspace-routing header that travels alongside it.
+    """
+    monkeypatch.setattr(
+        "omnigent.runner._entry._make_auth_token_factory",
+        lambda _server_url: lambda: "fresh-token",
+    )
+    reauth = native_policy_hook.policy_hook_reauth(
+        "https://acme.databricks.com/api/2.0/omnigent",
+        {"Authorization": "Bearer stale", "X-Databricks-Org-Id": "o9"},
+    )
+    assert reauth() == {"Authorization": "Bearer fresh-token", "X-Databricks-Org-Id": "o9"}
+
+
+def test_policy_hook_reauth_returns_none_without_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No refresh mechanism (local/unauth) → ``None`` so the caller fails closed."""
+    monkeypatch.setattr(
+        "omnigent.runner._entry._make_auth_token_factory",
+        lambda _server_url: None,
+    )
+    reauth = native_policy_hook.policy_hook_reauth(
+        "http://127.0.0.1:6767", {"Content-Type": "application/json"}
+    )
+    assert reauth() is None

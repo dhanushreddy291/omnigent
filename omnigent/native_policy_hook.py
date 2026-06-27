@@ -96,9 +96,7 @@ def policy_hook_request_headers() -> dict[str, str]:
     return headers
 
 
-def policy_hook_wrapper_script(
-    server_url: str, session_id: str, hook_script_path: str
-) -> str:
+def policy_hook_wrapper_script(server_url: str, session_id: str, hook_script_path: str) -> str:
     """Build the ``/bin/sh`` wrapper a native policy hook is launched as.
 
     Resolves a one-shot Omnigent-server token and bakes the auth +
@@ -126,6 +124,44 @@ def policy_hook_wrapper_script(
         f"export {_AUTH_HEADERS_ENV}={shlex.quote(json.dumps(auth_headers))}\n"
         f"exec {shlex.quote(sys.executable)} {shlex.quote(hook_script_path)}\n"
     )
+
+
+def policy_hook_reauth(
+    server_url: str, headers: dict[str, str]
+) -> Callable[[], dict[str, str] | None]:
+    """Build a callable that re-mints the Omnigent bearer for *server_url*.
+
+    The baked one-shot token dies with the ~1h Databricks OAuth lifetime; on a
+    lapsed-token signal (401 or Apps ``302→/oidc/``) ``post_evaluate_with_retry``
+    calls this once to mint a fresh bearer through the same factory the
+    refresh-capable runtime auth uses, keeping the other headers (e.g.
+    ``X-Databricks-Org-Id``) so routing survives. Returns ``None`` when no
+    refresh mechanism is available, so the caller fails closed.
+
+    :param server_url: Omnigent server base URL the hook POSTs to.
+    :param headers: Current (lapsed) headers; the fresh bearer is merged over
+        a copy so routing headers survive.
+    :returns: A zero-arg callable returning fresh headers, or ``None``.
+    """
+
+    def _reauth() -> dict[str, str] | None:
+        # Lazy import: paid only on the rare re-auth path, off the hot path.
+        try:
+            from omnigent.runner._entry import _make_auth_token_factory
+        except Exception:  # noqa: BLE001 — best-effort; fail closed if unavailable
+            return None
+        factory = _make_auth_token_factory(server_url)
+        if factory is None:
+            return None
+        try:
+            token = factory()
+        except Exception:  # noqa: BLE001 — transient mint failure; fail closed
+            return None
+        if not token:
+            return None
+        return {**headers, "Authorization": f"Bearer {token}"}
+
+    return _reauth
 
 
 def _is_login_redirect_or_unauthorized(response: httpx.Response) -> bool:
