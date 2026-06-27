@@ -27,6 +27,11 @@ def test_build_read_only_permission_denies_native_and_relay_write_tools() -> Non
     from omnigent.claude_native_bridge import _MCP_SERVER_NAME
 
     perm = build_opencode_read_only_permission()
+    # Baseline: every unlisted tool still ASKS (routes through the policy
+    # engine), matching the default stance — NOT auto-allowed. opencode's
+    # built-in agent default is "*": "allow", so omitting this baseline would
+    # let unlisted relay tools / `task` run un-gated.
+    assert perm["*"] == "ask"
     # opencode's own native mutating/network tools are hard-denied.
     for tool in ("edit", "bash", "webfetch", "websearch"):
         assert perm[tool] == "deny"
@@ -34,11 +39,15 @@ def test_build_read_only_permission_denies_native_and_relay_write_tools() -> Non
     # ``<server>_<tool>`` naming — else the agent could write via the relay.
     for tool in ("sys_os_write", "sys_os_edit", "sys_os_shell"):
         assert perm[f"{_MCP_SERVER_NAME}_{tool}"] == "deny"
-    # Reads are NOT listed (they keep opencode's default-allow); sys_os_read is
-    # likewise not denied, so the relay's read path stays usable.
+    # Reads are NOT denied (they keep asking → policy auto-allows); sys_os_read
+    # is likewise not denied, so the relay's read path stays usable.
     assert "read" not in perm
     assert f"{_MCP_SERVER_NAME}_sys_os_read" not in perm
-    assert all(level == "deny" for level in perm.values())
+    # Dict order matters: opencode resolves to the LAST matching rule, so the
+    # "*" baseline must come before the specific denies or they'd be shadowed.
+    keys = list(perm)
+    assert keys[0] == "*"
+    assert all(perm[k] == "deny" for k in keys[1:])
 
 
 def test_build_omnigent_mcp_server_points_serve_mcp_at_bridge_dir() -> None:
